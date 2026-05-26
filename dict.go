@@ -23,9 +23,9 @@
 package gedis
 
 const (
-	dictSlotSize    = 8
-	dictInitSize    = 16
-	dictLoadFactor  = 75
+	dictSlotSize   = 8
+	dictInitSize   = 16
+	dictLoadFactor = 75
 )
 
 type Dict struct {
@@ -198,5 +198,21 @@ func fnv32(data []byte) uint32 {
 		h ^= uint32(b)
 		h *= 16777619
 	}
+	return h
+}
+
+func fnv32U16(v uint16) uint32 {
+	h := uint32(2166136261)
+	h ^= uint32(byte(v))
+	h *= 16777619
+	h ^= uint32(byte(v >> 8))
+	h *= 16777619
+	return h
+}
+
+func fnv32Byte(b byte) uint32 {
+	h := uint32(2166136261)
+	h ^= uint32(b)
+	h *= 16777619
 	return h
 }

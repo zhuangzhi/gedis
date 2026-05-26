@@ -68,7 +68,7 @@ func zslNodeSize(levelCount int) int {
 	return 18 + levelCount*8
 }
 
-func zslCreate(arena *Arena) *ZSkipList {
+func zslCreate(arena *Arena) ZSkipList {
 	headerSize := zslNodeSize(zskiplistMaxLevel)
 	headerOff := arena.Alloc(headerSize)
 
@@ -82,7 +82,7 @@ func zslCreate(arena *Arena) *ZSkipList {
 		arena.WriteUint32(zslLevelSpanOff(arena, headerOff, i), 0)
 	}
 
-	return &ZSkipList{
+	return ZSkipList{
 		headerOff: headerOff,
 		tailOff:   0,
 		length:    0,
@@ -99,8 +99,8 @@ func zslRandomLevel() int {
 }
 
 func zslInsert(arena *Arena, zsl *ZSkipList, memberOff int, score float64) int {
-	update := make([]int, zskiplistMaxLevel)
-	rank := make([]int, zskiplistMaxLevel)
+	var update [zskiplistMaxLevel]int
+	var rank [zskiplistMaxLevel]int
 
 	x := zsl.headerOff
 	for i := zsl.level - 1; i >= 0; i-- {
@@ -182,7 +182,7 @@ func zslInsert(arena *Arena, zsl *ZSkipList, memberOff int, score float64) int {
 }
 
 func zslDelete(arena *Arena, zsl *ZSkipList, memberOff int, score float64) bool {
-	update := make([]int, zskiplistMaxLevel)
+	var update [zskiplistMaxLevel]int
 
 	x := zsl.headerOff
 	for i := zsl.level - 1; i >= 0; i-- {
@@ -223,7 +223,7 @@ func zslDelete(arena *Arena, zsl *ZSkipList, memberOff int, score float64) bool 
 		return false
 	}
 
-	zslDeleteNode(arena, zsl, x, update)
+	zslDeleteNode(arena, zsl, x, update[:])
 	return true
 }
 

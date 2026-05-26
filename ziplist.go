@@ -199,6 +199,25 @@ func ziplistReadEntryData(arena *Arena, entryOff int) []byte {
 	return buf
 }
 
+func ziplistEntryDataEquals(arena *Arena, entryOff int, data []byte) bool {
+	_, prevLenSize := ziplistEntryPrevLen(arena, entryOff)
+	isStr, length, encSize := ziplistEntryEncoding(arena, entryOff+prevLenSize)
+	if !isStr {
+		return false
+	}
+	if length != len(data) {
+		return false
+	}
+	dataOff := entryOff + prevLenSize + encSize
+	slice := arena.GetSlice(dataOff, length)
+	for i := range slice {
+		if slice[i] != data[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func ziplistEntrySize(prevLen int, data []byte) int {
 	plSize := 1
 	if prevLen >= ziplistMaxPrevLen {

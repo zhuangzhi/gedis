@@ -45,8 +45,8 @@ func TestArenaAllocFree(t *testing.T) {
 	a.Free(off1)
 
 	off3 := a.Alloc(10)
-	if off3 != off2+4+20 {
-		t.Fatalf("expected reuse of freed block, got %d", off3)
+	if off3 != off1 {
+		t.Fatalf("expected reuse of freed block at %d, got %d", off1, off3)
 	}
 }
 
@@ -393,11 +393,11 @@ func TestZRange(t *testing.T) {
 	db.ZAdd("myzset", 2.0, []byte("b"))
 
 	result := db.ZRange("myzset", 0, -1)
-	if len(result) != 3 {
-		t.Fatalf("expected 3 members, got %d", len(result))
+	if result.Len() != 3 {
+		t.Fatalf("expected 3 members, got %d", result.Len())
 	}
-	if string(result[0]) != "a" || string(result[1]) != "b" || string(result[2]) != "c" {
-		t.Fatalf("unexpected order: %v", result)
+	if string(result.Get(0)) != "a" || string(result.Get(1)) != "b" || string(result.Get(2)) != "c" {
+		t.Fatalf("unexpected order: %v, %v, %v", string(result.Get(0)), string(result.Get(1)), string(result.Get(2)))
 	}
 }
 

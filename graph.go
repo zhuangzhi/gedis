@@ -237,9 +237,9 @@ func (db *RedisDB) getAllNodeIDs(graphName string) []string {
 func (db *RedisDB) getOutgoingEdges(graphName, nodeID, edgeType string) []string {
 	outKey := graphName + ":out:" + nodeID + ":" + edgeType
 	members := db.ZRange(outKey, 0, -1)
-	result := make([]string, len(members))
-	for i, m := range members {
-		result[i] = string(m)
+	result := make([]string, members.Len())
+	for i := 0; i < members.Len(); i++ {
+		result[i] = string(members.Get(i))
 	}
 	return result
 }

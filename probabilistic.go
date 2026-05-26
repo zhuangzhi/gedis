@@ -202,7 +202,7 @@ func (db *RedisDB) CFAdd(key string, item []byte) bool {
 
 	fp := cfFingerprint(item)
 	i1 := int(fnv32(item) % uint32(numBuckets))
-	i2 := i1 ^ int(fnv32(append(item, byte(fp&0xFF))))%numBuckets
+	i2 := i1 ^ int(fnv32U16(fp)%uint32(numBuckets))
 
 	if cfInsertBucket(db.arena, bucketsOff, numBuckets, i1, fp) {
 		return true
@@ -214,14 +214,14 @@ func (db *RedisDB) CFAdd(key string, item []byte) bool {
 	curIdx := i1
 	for n := 0; n < cfMaxKicks; n++ {
 		bucketOff := bucketsOff + curIdx*cfBucketSize*cfFingerprintSize
-		slot := int(fnv32(append(item, byte(n)))) % cfBucketSize
+		slot := int(fnv32Byte(byte(n))) % cfBucketSize
 		slotOff := bucketOff + slot*cfFingerprintSize
 
 		oldFp := db.arena.ReadUint16(slotOff)
 		db.arena.WriteUint16(slotOff, fp)
 
 		fp = oldFp
-		curIdx = curIdx ^ int(fnv32(append(item, byte(fp&0xFF))))%numBuckets
+		curIdx = curIdx ^ int(fnv32U16(fp)%uint32(numBuckets))
 
 		if cfInsertBucket(db.arena, bucketsOff, numBuckets, curIdx, fp) {
 			return true
@@ -246,7 +246,7 @@ func (db *RedisDB) CFDel(key string, item []byte) bool {
 
 	fp := cfFingerprint(item)
 	i1 := int(fnv32(item) % uint32(numBuckets))
-	i2 := i1 ^ int(fnv32(append(item, byte(fp&0xFF))))%numBuckets
+	i2 := i1 ^ int(fnv32U16(fp)%uint32(numBuckets))
 
 	if cfRemoveFromBucket(db.arena, bucketsOff, i1, fp) {
 		return true
@@ -273,7 +273,7 @@ func (db *RedisDB) CFExists(key string, item []byte) bool {
 
 	fp := cfFingerprint(item)
 	i1 := int(fnv32(item) % uint32(numBuckets))
-	i2 := i1 ^ int(fnv32(append(item, byte(fp&0xFF))))%numBuckets
+	i2 := i1 ^ int(fnv32U16(fp)%uint32(numBuckets))
 
 	if cfFindInBucket(db.arena, bucketsOff, i1, fp) {
 		return true
@@ -378,9 +378,10 @@ func (db *RedisDB) CMSIncrBy(key string, item []byte, inc int) int {
 	countersOff := dataOff + 8
 
 	minVal := int(^uint32(0) >> 1)
+	baseH := fnv32(item)
 
 	for d := 0; d < depth; d++ {
-		h := int(fnv32(append(item, byte(d)))) % width
+		h := int(((baseH ^ uint32(d)) * 16777619) % uint32(width))
 		counterOff := countersOff + (d*width+h)*4
 		val := int(db.arena.ReadUint32(counterOff)) + inc
 		db.arena.WriteUint32(counterOff, uint32(val))
@@ -411,8 +412,9 @@ func (db *RedisDB) CMSQuery(key string, items ...[]byte) []int {
 
 	for idx, item := range items {
 		minVal := int(^uint32(0) >> 1)
+		baseH := fnv32(item)
 		for d := 0; d < depth; d++ {
-			h := int(fnv32(append(item, byte(d)))) % width
+			h := int(((baseH ^ uint32(d)) * 16777619) % uint32(width))
 			val := int(db.arena.ReadUint32(countersOff + (d*width+h)*4))
 			if val < minVal {
 				minVal = val

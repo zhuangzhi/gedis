@@ -136,7 +136,7 @@ func (db *RedisDB) GeoRadius(key string, lon, lat, radius float64, unit string) 
 	}
 
 	radiusMeters := convertToMeters(radius, unit)
-	zsl := db.loadZSkipList(dataOff)
+	zsl := zslLoadFromArena(db.arena, dataOff)
 
 	var result []string
 

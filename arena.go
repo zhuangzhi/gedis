@@ -58,7 +58,7 @@ func (a *Arena) Alloc(size int) int {
 
 	for i, freeOff := range a.free {
 		blockSize := int(a.ReadUint32(freeOff))
-		if blockSize >= size+arenaHeaderSize {
+		if blockSize >= size {
 			a.free = append(a.free[:i], a.free[i+1:]...)
 			a.WriteUint32(freeOff, uint32(size))
 			return freeOff + arenaHeaderSize

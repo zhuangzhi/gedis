@@ -1,15 +1,15 @@
 # gedis
 
-[English](./README_EN.md)
+[中文](./README.md)
 
 [![Go Version](https://img.shields.io/badge/Go-1.21%2B-blue)](https://go.dev/)
 [![Test](https://img.shields.io/badge/tests-42%20passed-brightgreen)](./redis_test.go)
 [![Benchmark](https://img.shields.io/badge/benchmarks-42-f1c40f)](./redis_bench_test.go)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 
-gedis 是一个嵌入式 Redis-like 内存数据库，Go 语言实现。核心设计目标是 **零 GC 压力** —— 所有持久化数据存储在单一 `[]byte` Arena 中，使用整数偏移量替代 Go 指针，避免 GC 扫描结构化数据。
+gedis is an embedded Redis-like in-memory database written in Go. The core design goal is **zero GC pressure** — all persistent data lives in a single `[]byte` Arena, using integer offsets instead of Go pointers to prevent the GC from scanning structured data.
 
-## 架构
+## Architecture
 
 ```
 +---------------------------------------------------------------+
@@ -18,57 +18,57 @@ gedis 是一个嵌入式 Redis-like 内存数据库，Go 语言实现。核心�
 |  |      Dict        |  |     Arena      |  |  sync.RWMutex |   |
 |  |  (key space)      |  |  ([]byte buf)  |  |               |   |
 |  |                  |  |                |  |               |   |
-|  |  key -> Object   |  |  所有数据存储   |  |               |   |
+|  |  key -> Object   |  |  all data       |  |               |   |
 |  +------------------+  +----------------+  +---------------+   |
 +---------------------------------------------------------------+
 ```
 
-## 核心设计
+## Core Design
 
-### Zero-GC Arena 内存管理
+### Zero-GC Arena Memory Allocator
 
-所有持久化数据存储在 `Arena` 的单块 `[]byte` 缓冲区中：
+All persistent data is stored in a single `[]byte` buffer managed by `Arena`:
 
-- **分配**：`Arena.Alloc(size)` 返回整数偏移量，数据通过 `WriteUint32(offset, value)` 等方法写入
-- **释放**：`Arena.Free(offset)` 将块加入 free list，后续分配会优先复用
-- **写入**：`WriteUint32/WriteUint64/WriteBytes` 直接将数据写入底层 `[]byte`
-- **读取**：`ReadUint32/ReadBytes` 从底层缓冲区直接读取
-- **零 Go 指针**：内部结构之间全部使用整数偏移量引用，GC 无需扫描 Arena 内部数据
+- **Allocation**: `Arena.Alloc(size)` returns an integer offset; data is written via `WriteUint32(offset, value)` etc.
+- **Free**: `Arena.Free(offset)` adds the block to a free list for reuse in subsequent allocations.
+- **Write**: `WriteUint32` / `WriteUint64` / `WriteBytes` write directly into the underlying `[]byte`.
+- **Read**: `ReadUint32` / `ReadBytes` read directly from the underlying buffer.
+- **Zero Go pointers**: All internal structures reference each other via integer offsets; the GC never needs to scan Arena-internal data.
 
 ```
 +------------+----------------------------------+
 | size (4B)  |  data (variable)                 |
 +------------+----------------------------------+
- ↑ header     ↑ dataOff (返回给调用方)
+ ↑ header     ↑ dataOff (returned to caller)
 ```
 
-### Dict 哈希表
+### Dict Hash Table
 
-FNV-1a 哈希 + 线性探测，在 Arena 中存储。支持动态 rehash（负载因子 > 75%）。
+FNV-1a hashing + linear probing, stored in Arena. Supports dynamic rehash (load factor > 75%).
 
-### Object 头
+### Object Header
 
-每个存储值前有一个 16 字节对象头：
+Each stored value is prefixed with a 16-byte object header:
 
-| 偏移 | 大小 | 字段 |
-|------|------|------|
+| Offset | Size | Field |
+|--------|------|-------|
 | 0 | 1 | type |
 | 1 | 1 | encoding |
 | 2 | 4 | lru |
 | 6 | 2 | refcount |
 | 8 | 8 | data_offset |
 
-### 内部数据结构
+### Internal Data Structures
 
-| 结构 | 用途 | 说明 |
-|------|------|------|
-| Ziplist | List / Hash / 小 ZSet | 双端紧凑列表，prevLen + encoding + data |
-| Skiplist | ZSet | 32 级跳跃表，存储于 Arena |
-| Intset | 小整数 Set | 有序整数集合，支持 2/4/8 字节编码升级 |
-| Rax-like | Stream | 基数树风格条目存储，含消费者组 |
-| Chunk | TimeSeries | 分块时间-值对存储 |
+| Structure | Used By | Description |
+|-----------|---------|-------------|
+| Ziplist | List / Hash / Small ZSet | Double-ended packed list: prevLen + encoding + data |
+| Skiplist | ZSet | 32-level skip list, stored in Arena |
+| Intset | Small integer Set | Sorted integer set with 2/4/8 byte encoding upgrade |
+| Rax-like | Stream | Radix-tree-style entry storage with consumer groups |
+| Chunk | TimeSeries | Chunked timestamp-value pair storage |
 
-## API 参考
+## API Reference
 
 ### Keys
 
@@ -245,7 +245,7 @@ func (db *RedisDB) Throttle(key string, maxBurst, rate int64, period int64) Thro
 func (db *RedisDB) CellReset(key string)
 ```
 
-## 使用示例
+## Usage Example
 
 ```go
 package main
@@ -290,16 +290,16 @@ func main() {
 }
 ```
 
-## 并发安全
+## Concurrency Safety
 
-所有 public API 均在内部使用 `sync.RWMutex` 保护：
+All public APIs are internally protected by `sync.RWMutex`:
 
-- **写操作**（Set、Del、LPush、ZAdd 等）：`Lock`
-- **读操作**（Get、Exists、ZScore 等）：`RLock`
+- **Write operations** (Set, Del, LPush, ZAdd, etc.): `Lock`
+- **Read operations** (Get, Exists, ZScore, etc.): `RLock`
 
-可以安全地从多个 goroutine 并发访问。
+Safe for concurrent access from multiple goroutines.
 
-## 性能基准
+## Performance Benchmarks
 
 Intel Core Ultra 9 185H, Windows, Go 1.21+
 
@@ -307,10 +307,10 @@ Intel Core Ultra 9 185H, Windows, Go 1.21+
 go test -bench=. -benchtime=300ms -benchmem -count=1 -run NONE .
 ```
 
-### 核心组件
+### Core Components
 
-| Benchmark | 耗时 | 吞吐量 | 字节 | 分配 |
-|-----------|------|--------|------|------|
+| Benchmark | Latency | Throughput | Bytes | Allocs |
+|-----------|---------|------------|-------|--------|
 | Arena Alloc (64B) | 39.7 ns | ~25M ops/s | 218 B | 0 |
 | Arena Alloc+Free | 3.8 ns | ~265M ops/s | 0 B | 0 |
 | Arena Read/Write | 0.5 ns | ~2G ops/s | 0 B | 0 |
@@ -318,10 +318,10 @@ go test -bench=. -benchtime=300ms -benchmem -count=1 -run NONE .
 | Dict Get | 49.5 ns | ~20M ops/s | 3 B | 1 |
 | Dict Del | 14.7 ns | ~68M ops/s | 20 B | 0 |
 
-### Redis 命令
+### Redis Commands
 
-| Benchmark | 耗时 | 吞吐量 | 字节 | 分配 |
-|-----------|------|--------|------|------|
+| Benchmark | Latency | Throughput | Bytes | Allocs |
+|-----------|---------|------------|-------|--------|
 | SET | 45.1 ns | ~22M ops/s | 135 B | 0 |
 | GET | 76.7 ns | ~13M ops/s | 37 B | 2 |
 | DEL | 62.4 ns | ~16M ops/s | 22 B | 0 |
@@ -355,63 +355,64 @@ go test -bench=. -benchtime=300ms -benchmem -count=1 -run NONE .
 | CMS.INCRBY | 82.3 ns | ~12M ops/s | 13 B | 1 |
 | TOPK.ADD | 361 ns | ~2.8M ops/s | 7 B | 1 |
 
-### 并发
+### Concurrency
 
-| Benchmark | 耗时 | 吞吐量 | 字节 | 分配 |
-|-----------|------|--------|------|------|
+| Benchmark | Latency | Throughput | Bytes | Allocs |
+|-----------|---------|------------|-------|--------|
 | Concurrent Read | 74.4 ns | ~13M ops/s | 11 B | 2 |
 | Concurrent Write | 149 ns | ~6.7M ops/s | 69 B | 1 |
 | Concurrent IncrBy | 56.3 ns | ~18M ops/s | 0 B | 0 |
 | Mixed Read (5 ops) | 580 ns | ~1.7M iter/s | 110 B | 14 |
 
-## 逃逸分析
+## Escape Analysis
 
-`go build -gcflags="-m" .` 验证 Zero-GC 设计：
+`go build -gcflags="-m" .` verifies the zero-GC design:
 
-- `Arena.Alloc` 所有读写操作 **零堆分配**
-- `make([]byte, size)` 临时缓冲区 **does not escape** （栈分配）
-- `string` → `[]byte` 转换 **zero-copy conversion**
-- `ziplist`/`skiplist` 内部操作 `arena does not escape`
-- 仅 API 返回值（`string(member)`、`append(...)` 构建返回切片）和 `sync.RWMutex` 发生预期逃逸
+- All `Arena.Alloc` read/write operations produce **zero heap allocations**
+- Temporary `make([]byte, size)` buffers **do not escape** (stack-allocated)
+- `string` → `[]byte` conversions use **zero-copy**
+- `ziplist`/`skiplist` internal operations: `arena does not escape`
+- Only API return values (`string(member)`, slices from `append(...)`) and `sync.RWMutex` escape to heap as expected
 
-## 项目结构
+## Project Structure
 
 ```
 gedis/
-├── arena.go          # Arena 内存分配器
-├── object.go         # 对象头管理
-├── dict.go           # 哈希表 (FNV-1a + 线性探测)
-├── redis.go          # RedisDB 主结构
-├── string.go         # String 命令
-├── list.go           # List 命令
-├── hash.go           # Hash 命令
-├── set.go            # Set 命令
-├── zset.go           # Sorted Set 命令
-├── ziplist.go        # Ziplist 内部结构
-├── skip_list.go      # Skiplist 内部结构
-├── bitmap.go         # Bitmap / BitField 命令
-├── hyperloglog.go    # HyperLogLog 命令
-├── geo.go            # Geo 命令
-├── stream.go         # Stream 命令
-├── timeseries.go     # TimeSeries 命令
-├── probabilistic.go  # Bloom/Cuckoo/CMS/TopK 命令
-├── json.go           # JSON 命令
-├── search.go         # Search 命令
-├── graph.go          # Graph 命令
-├── cell.go           # Rate Limiter 命令
-├── redis_test.go     # 单元测试 (42 tests)
-└── redis_bench_test.go # 性能基准测试 (42 benchmarks)
+├── arena.go          # Arena memory allocator
+├── object.go         # Object header management
+├── dict.go           # Hash table (FNV-1a + linear probing)
+├── redis.go          # RedisDB main structure
+├── string.go         # String commands
+├── list.go           # List commands
+├── hash.go           # Hash commands
+├── set.go            # Set commands
+├── zset.go           # Sorted Set commands
+├── ziplist.go        # Ziplist internal structure
+├── skip_list.go      # Skiplist internal structure
+├── bitmap.go         # Bitmap / BitField commands
+├── hyperloglog.go    # HyperLogLog commands
+├── geo.go            # Geo commands
+├── stream.go         # Stream commands
+├── timeseries.go     # TimeSeries commands
+├── probabilistic.go  # Bloom/Cuckoo/CMS/TopK commands
+├── json.go           # JSON commands
+├── search.go         # Search commands
+├── graph.go          # Graph commands
+├── cell.go           # Rate Limiter commands
+├── redis_test.go     # Unit tests (42 tests)
+└── redis_bench_test.go # Benchmarks (42 benchmarks)
+```
 
-## 测试
+## Testing
 
 ```bash
-# 运行所有单元测试
+# Run all unit tests
 go test -v ./...
 
-# 运行性能基准测试
+# Run all benchmarks
 go test -bench=. -benchtime=300ms -benchmem -count=1 -run NONE .
 
-# 运行逃逸分析
+# Run escape analysis
 go build -gcflags="-m" .
 ```
 

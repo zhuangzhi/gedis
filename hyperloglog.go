@@ -27,10 +27,10 @@ import (
 )
 
 const (
-	hllRegisters    = 16384
-	hllPMask        = hllRegisters - 1
-	hllBits         = 6
-	hllBytes        = (hllRegisters * hllBits) / 8
+	hllRegisters = 16384
+	hllPMask     = hllRegisters - 1
+	hllBits      = 6
+	hllBytes     = (hllRegisters * hllBits) / 8
 )
 
 func (db *RedisDB) PFAdd(key string, elements ...[]byte) int {
@@ -40,21 +40,23 @@ func (db *RedisDB) PFAdd(key string, elements ...[]byte) int {
 	keyBytes := []byte(key)
 	headOff, ok := db.dict.Get(keyBytes)
 
-	var registers []byte
+	var regOff int
 	if ok {
-		dataOff := db.ObjectDataOffset(headOff)
-		if dataOff != 0 {
-			size := db.arena.SizeAt(dataOff)
-			registers = db.arena.ReadBytes(dataOff, size)
-			if len(registers) < hllBytes {
-				registers = make([]byte, hllBytes)
+		regOff = db.ObjectDataOffset(headOff)
+		if regOff == 0 || db.arena.SizeAt(regOff) < hllBytes {
+			if regOff != 0 {
+				db.arena.Free(regOff)
 			}
-		} else {
-			registers = make([]byte, hllBytes)
+			regOff = db.arena.Alloc(hllBytes)
+			db.ObjectSetDataOffset(headOff, regOff)
 		}
 	} else {
-		registers = make([]byte, hllBytes)
+		regOff = db.arena.Alloc(hllBytes)
+		headOff = db.NewObject(ObjHLL, ObjEncodingRaw, regOff)
+		db.dict.Set(keyBytes, headOff)
 	}
+
+	registers := db.arena.GetSlice(regOff, hllBytes)
 
 	updated := 0
 	for _, elem := range elements {
@@ -72,20 +74,6 @@ func (db *RedisDB) PFAdd(key string, elements ...[]byte) int {
 		}
 	}
 
-	if ok {
-		oldDataOff := db.ObjectDataOffset(headOff)
-		if oldDataOff != 0 {
-			db.arena.Free(oldDataOff)
-		}
-		newOff := db.arena.AllocBytes(registers)
-		db.ObjectSetDataOffset(headOff, newOff)
-		db.ObjectSetEncoding(headOff, ObjEncodingRaw)
-	} else {
-		newOff := db.arena.AllocBytes(registers)
-		headOff = db.NewObject(ObjHLL, ObjEncodingRaw, newOff)
-		db.dict.Set(keyBytes, headOff)
-	}
-
 	return updated
 }
 
@@ -97,8 +85,22 @@ func (db *RedisDB) PFCount(keys ...string) int64 {
 		return 0
 	}
 
-	merged := make([]byte, hllBytes)
+	if len(keys) == 1 {
+		headOff, ok := db.dict.Get([]byte(keys[0]))
+		if !ok {
+			return 0
+		}
+		dataOff := db.ObjectDataOffset(headOff)
+		if dataOff == 0 {
+			return 0
+		}
+		return hllEstimate(db.arena.GetSlice(dataOff, hllBytes))
+	}
 
+	mergedOff := db.arena.Alloc(hllBytes)
+	merged := db.arena.GetSlice(mergedOff, hllBytes)
+
+	first := true
 	for _, key := range keys {
 		headOff, ok := db.dict.Get([]byte(key))
 		if !ok {
@@ -108,8 +110,13 @@ func (db *RedisDB) PFCount(keys ...string) int64 {
 		if dataOff == 0 {
 			continue
 		}
-		size := db.arena.SizeAt(dataOff)
-		registers := db.arena.ReadBytes(dataOff, size)
+		registers := db.arena.GetSlice(dataOff, hllBytes)
+
+		if first {
+			copy(merged, registers)
+			first = false
+			continue
+		}
 
 		for i := 0; i < hllRegisters; i++ {
 			a := hllGetRegister(merged, i)
@@ -120,15 +127,19 @@ func (db *RedisDB) PFCount(keys ...string) int64 {
 		}
 	}
 
-	return hllEstimate(merged)
+	result := hllEstimate(merged)
+	db.arena.Free(mergedOff)
+	return result
 }
 
 func (db *RedisDB) PFMerge(dest string, sources ...string) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	merged := make([]byte, hllBytes)
+	mergedOff := db.arena.Alloc(hllBytes)
+	merged := db.arena.GetSlice(mergedOff, hllBytes)
 
+	first := true
 	for _, key := range sources {
 		headOff, ok := db.dict.Get([]byte(key))
 		if !ok {
@@ -138,8 +149,13 @@ func (db *RedisDB) PFMerge(dest string, sources ...string) {
 		if dataOff == 0 {
 			continue
 		}
-		size := db.arena.SizeAt(dataOff)
-		registers := db.arena.ReadBytes(dataOff, size)
+		registers := db.arena.GetSlice(dataOff, hllBytes)
+
+		if first {
+			copy(merged, registers)
+			first = false
+			continue
+		}
 
 		for i := 0; i < hllRegisters; i++ {
 			a := hllGetRegister(merged, i)
@@ -159,7 +175,9 @@ func (db *RedisDB) PFMerge(dest string, sources ...string) {
 		}
 	}
 
-	newOff := db.arena.AllocBytes(merged)
+	newOff := db.arena.Alloc(hllBytes)
+	db.arena.WriteBytes(newOff, merged)
+	db.arena.Free(mergedOff)
 	var headOff int
 	if exists {
 		headOff = existingHeadOff

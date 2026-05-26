@@ -46,24 +46,20 @@ func (db *RedisDB) HSet(key string, field string, value []byte) int {
 	if enc == ObjEncodingZiplist {
 		zlOff := dataOff
 		n := ziplistLen(db.arena, zlOff)
-		added := 0
-		found := false
 		for i := 0; i < n; i += 2 {
 			f := ziplistGet(db.arena, zlOff, i)
 			if string(f) == field {
 				zlOff = ziplistDelete(db.arena, zlOff, i+1)
 				zlOff = ziplistInsertAt(db.arena, zlOff, i+1, value)
-				found = true
-				break
+				db.ObjectSetDataOffset(headOff, zlOff)
+				return 0
 			}
 		}
-		if !found {
-			zlOff = ziplistInsert(db.arena, zlOff, []byte(field), false)
-			zlOff = ziplistInsert(db.arena, zlOff, value, false)
-			added = 1
-		}
+
+		zlOff = ziplistInsert(db.arena, zlOff, []byte(field), false)
+		zlOff = ziplistInsert(db.arena, zlOff, value, false)
 		db.ObjectSetDataOffset(headOff, zlOff)
-		return added
+		return 1
 	}
 
 	return 0
@@ -85,11 +81,13 @@ func (db *RedisDB) HGet(key string, field string) ([]byte, bool) {
 	if enc == ObjEncodingZiplist {
 		zlOff := dataOff
 		n := ziplistLen(db.arena, zlOff)
+		pos := zlOff + ziplistHeaderSize
 		for i := 0; i < n; i += 2 {
-			f := ziplistGet(db.arena, zlOff, i)
-			if string(f) == field {
+			if ziplistEntryDataEquals(db.arena, pos, []byte(field)) {
 				return ziplistGet(db.arena, zlOff, i+1), true
 			}
+			pos += ziplistEntryTotalSize(db.arena, pos)
+			pos += ziplistEntryTotalSize(db.arena, pos)
 		}
 		return nil, false
 	}
@@ -115,14 +113,16 @@ func (db *RedisDB) HDel(key string, fields ...string) int {
 		deleted := 0
 		for _, field := range fields {
 			n := ziplistLen(db.arena, zlOff)
+			pos := zlOff + ziplistHeaderSize
 			for i := 0; i < n; i += 2 {
-				f := ziplistGet(db.arena, zlOff, i)
-				if string(f) == field {
+				if ziplistEntryDataEquals(db.arena, pos, []byte(field)) {
 					zlOff = ziplistDelete(db.arena, zlOff, i+1)
 					zlOff = ziplistDelete(db.arena, zlOff, i)
 					deleted++
 					break
 				}
+				pos += ziplistEntryTotalSize(db.arena, pos)
+				pos += ziplistEntryTotalSize(db.arena, pos)
 			}
 		}
 		db.ObjectSetDataOffset(headOff, zlOff)
@@ -187,9 +187,9 @@ func (db *RedisDB) HIncrBy(key string, field string, inc int64) (int64, error) {
 	if enc == ObjEncodingZiplist {
 		zlOff := dataOff
 		n := ziplistLen(db.arena, zlOff)
+		pos := zlOff + ziplistHeaderSize
 		for i := 0; i < n; i += 2 {
-			f := ziplistGet(db.arena, zlOff, i)
-			if string(f) == field {
+			if ziplistEntryDataEquals(db.arena, pos, []byte(field)) {
 				v := ziplistGet(db.arena, zlOff, i+1)
 				oldVal, err := strconv.ParseInt(string(v), 10, 64)
 				if err != nil {
@@ -202,6 +202,8 @@ func (db *RedisDB) HIncrBy(key string, field string, inc int64) (int64, error) {
 				db.ObjectSetDataOffset(headOff, zlOff)
 				return newVal, nil
 			}
+			pos += ziplistEntryTotalSize(db.arena, pos)
+			pos += ziplistEntryTotalSize(db.arena, pos)
 		}
 
 		zlOff = ziplistInsert(db.arena, zlOff, []byte(field), false)

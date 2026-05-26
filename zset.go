@@ -32,7 +32,7 @@ func (db *RedisDB) ZAdd(key string, score float64, member []byte) int {
 	if !ok {
 		zsl := zslCreate(db.arena)
 		memberOff := db.arena.AllocBytes(member)
-		nodeOff := zslInsert(db.arena, zsl, memberOff, score)
+		nodeOff := zslInsert(db.arena, &zsl, memberOff, score)
 		if nodeOff == 0 {
 			db.arena.Free(memberOff)
 			return 0
@@ -53,14 +53,14 @@ func (db *RedisDB) ZAdd(key string, score float64, member []byte) int {
 	dataOff := db.ObjectDataOffset(headOff)
 
 	if enc == ObjEncodingSkiplist {
-		zsl := db.loadZSkipList(dataOff)
+		zsl := zslLoadFromArena(db.arena, dataOff)
 		memberOff := db.arena.AllocBytes(member)
-		nodeOff := zslInsert(db.arena, zsl, memberOff, score)
+		nodeOff := zslInsert(db.arena, &zsl, memberOff, score)
 		if nodeOff == 0 {
 			db.arena.Free(memberOff)
 			return 0
 		}
-		db.saveZSkipList(dataOff, zsl)
+		zslSaveToArena(db.arena, dataOff, &zsl)
 		return 1
 	}
 
@@ -81,7 +81,7 @@ func (db *RedisDB) ZRem(key string, member []byte) bool {
 	dataOff := db.ObjectDataOffset(headOff)
 
 	if enc == ObjEncodingSkiplist {
-		zsl := db.loadZSkipList(dataOff)
+		zsl := zslLoadFromArena(db.arena, dataOff)
 
 		x := int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, zsl.headerOff, 0)))
 		found := false
@@ -103,11 +103,11 @@ func (db *RedisDB) ZRem(key string, member []byte) bool {
 		}
 
 		memberOff := db.arena.AllocBytes(member)
-		result := zslDelete(db.arena, zsl, memberOff, score)
+		result := zslDelete(db.arena, &zsl, memberOff, score)
 		db.arena.Free(memberOff)
 
 		if result {
-			db.saveZSkipList(dataOff, zsl)
+			zslSaveToArena(db.arena, dataOff, &zsl)
 			if zsl.length == 0 {
 				db.dict.Del(keyBytes)
 				db.FreeObject(headOff)
@@ -133,7 +133,7 @@ func (db *RedisDB) ZScore(key string, member []byte) (float64, bool) {
 	dataOff := db.ObjectDataOffset(headOff)
 
 	if enc == ObjEncodingSkiplist {
-		zsl := db.loadZSkipList(dataOff)
+		zsl := zslLoadFromArena(db.arena, dataOff)
 		x := int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, zsl.headerOff, 0)))
 		for x != 0 {
 			xScore := db.arena.ReadFloat64(zslNodeScoreOff(db.arena, x))
@@ -149,21 +149,43 @@ func (db *RedisDB) ZScore(key string, member []byte) (float64, bool) {
 	return 0, false
 }
 
-func (db *RedisDB) ZRange(key string, start, stop int) [][]byte {
+type ZSlices struct {
+	offsets []int
+	members []byte
+}
+
+func (s *ZSlices) Len() int {
+	return len(s.offsets)
+}
+
+func (s *ZSlices) Add(data []byte) {
+	s.offsets = append(s.offsets, len(s.members))
+	s.members = append(s.members, data...)
+}
+
+func (s *ZSlices) Get(i int) []byte {
+	from := s.offsets[i]
+	if i+1 < len(s.offsets) {
+		return s.members[from:s.offsets[i+1]]
+	}
+	return s.members[from:]
+}
+
+func (db *RedisDB) ZRange(key string, start, stop int) ZSlices {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
 	keyBytes := []byte(key)
 	headOff, ok := db.dict.Get(keyBytes)
 	if !ok {
-		return nil
+		return ZSlices{}
 	}
 
 	enc := db.ObjectEncoding(headOff)
 	dataOff := db.ObjectDataOffset(headOff)
 
 	if enc == ObjEncodingSkiplist {
-		zsl := db.loadZSkipList(dataOff)
+		zsl := zslLoadFromArena(db.arena, dataOff)
 		n := zsl.length
 
 		if start < 0 {
@@ -179,19 +201,43 @@ func (db *RedisDB) ZRange(key string, start, stop int) [][]byte {
 			stop = n - 1
 		}
 		if start > stop {
-			return nil
+			return ZSlices{}
 		}
 
-		result := make([][]byte, 0, stop-start+1)
+		count := stop - start + 1
+		totalBytes := 0
 		x := int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, zsl.headerOff, 0)))
 		idx := 0
 		for x != 0 {
-			if idx >= start && idx <= stop {
+			if idx >= start {
 				xMemberOff := int(db.arena.ReadUint32(zslNodeMemberOff(db.arena, x)))
-				member := db.arena.ReadBytes(xMemberOff, db.arena.SizeAt(xMemberOff))
-				result = append(result, member)
+				totalBytes += db.arena.SizeAt(xMemberOff)
 			}
-			if idx > stop {
+			if idx >= stop {
+				break
+			}
+			x = int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, x, 0)))
+			idx++
+		}
+
+		result := ZSlices{
+			offsets: make([]int, count),
+			members: make([]byte, totalBytes),
+		}
+		mPos := 0
+		x = int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, zsl.headerOff, 0)))
+		idx = 0
+		out := 0
+		for x != 0 {
+			if idx >= start {
+				xMemberOff := int(db.arena.ReadUint32(zslNodeMemberOff(db.arena, x)))
+				sz := db.arena.SizeAt(xMemberOff)
+				result.offsets[out] = mPos
+				copy(result.members[mPos:], db.arena.GetSlice(xMemberOff, sz))
+				mPos += sz
+				out++
+			}
+			if idx >= stop {
 				break
 			}
 			x = int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, x, 0)))
@@ -200,7 +246,56 @@ func (db *RedisDB) ZRange(key string, start, stop int) [][]byte {
 		return result
 	}
 
-	return nil
+	return ZSlices{}
+}
+
+func (db *RedisDB) ZRangeIter(key string, start, stop int, fn func(member []byte)) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+	if !ok {
+		return
+	}
+
+	enc := db.ObjectEncoding(headOff)
+	dataOff := db.ObjectDataOffset(headOff)
+
+	if enc == ObjEncodingSkiplist {
+		zsl := zslLoadFromArena(db.arena, dataOff)
+		n := zsl.length
+
+		if start < 0 {
+			start = n + start
+		}
+		if stop < 0 {
+			stop = n + stop
+		}
+		if start < 0 {
+			start = 0
+		}
+		if stop >= n {
+			stop = n - 1
+		}
+		if start > stop {
+			return
+		}
+
+		x := int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, zsl.headerOff, 0)))
+		idx := 0
+		for x != 0 {
+			if idx >= start && idx <= stop {
+				xMemberOff := int(db.arena.ReadUint32(zslNodeMemberOff(db.arena, x)))
+				fn(db.arena.GetSlice(xMemberOff, db.arena.SizeAt(xMemberOff)))
+			}
+			if idx > stop {
+				break
+			}
+			x = int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, x, 0)))
+			idx++
+		}
+	}
 }
 
 func (db *RedisDB) ZRangeWithScores(key string, start, stop int) ([]string, []float64) {
@@ -217,7 +312,7 @@ func (db *RedisDB) ZRangeWithScores(key string, start, stop int) ([]string, []fl
 	dataOff := db.ObjectDataOffset(headOff)
 
 	if enc == ObjEncodingSkiplist {
-		zsl := db.loadZSkipList(dataOff)
+		zsl := zslLoadFromArena(db.arena, dataOff)
 		n := zsl.length
 
 		if start < 0 {
@@ -275,7 +370,7 @@ func (db *RedisDB) ZRangeByScore(key string, min, max float64) [][]byte {
 	dataOff := db.ObjectDataOffset(headOff)
 
 	if enc == ObjEncodingSkiplist {
-		zsl := db.loadZSkipList(dataOff)
+		zsl := zslLoadFromArena(db.arena, dataOff)
 		var result [][]byte
 
 		x := int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, zsl.headerOff, 0)))
@@ -311,7 +406,7 @@ func (db *RedisDB) ZRemRangeByScore(key string, min, max float64) int {
 	dataOff := db.ObjectDataOffset(headOff)
 
 	if enc == ObjEncodingSkiplist {
-		zsl := db.loadZSkipList(dataOff)
+		zsl := zslLoadFromArena(db.arena, dataOff)
 		removed := 0
 
 		x := int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, zsl.headerOff, 0)))
@@ -319,7 +414,7 @@ func (db *RedisDB) ZRemRangeByScore(key string, min, max float64) int {
 			next := int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, x, 0)))
 			score := db.arena.ReadFloat64(zslNodeScoreOff(db.arena, x))
 			if score >= min && score <= max {
-				update := make([]int, zskiplistMaxLevel)
+				var update [zskiplistMaxLevel]int
 				ptr := zsl.headerOff
 				for i := zsl.level - 1; i >= 0; i-- {
 					for {
@@ -336,13 +431,13 @@ func (db *RedisDB) ZRemRangeByScore(key string, min, max float64) int {
 						ptr = fwd
 					}
 				}
-				zslDeleteNode(db.arena, zsl, x, update)
+				zslDeleteNode(db.arena, &zsl, x, update[:])
 				removed++
 			}
 			x = next
 		}
 
-		db.saveZSkipList(dataOff, zsl)
+		zslSaveToArena(db.arena, dataOff, &zsl)
 		if zsl.length == 0 {
 			db.dict.Del(keyBytes)
 			db.FreeObject(headOff)
@@ -367,30 +462,25 @@ func (db *RedisDB) ZCard(key string) int {
 	dataOff := db.ObjectDataOffset(headOff)
 
 	if enc == ObjEncodingSkiplist {
-		zsl := db.loadZSkipList(dataOff)
+		zsl := zslLoadFromArena(db.arena, dataOff)
 		return zsl.length
 	}
 
 	return 0
 }
 
-func (db *RedisDB) loadZSkipList(dataOff int) *ZSkipList {
-	hdrOff := int(db.arena.ReadUint32(dataOff))
-	tailOff := int(db.arena.ReadUint32(dataOff + 4))
-	length := int(db.arena.ReadUint32(dataOff + 8))
-	level := int(db.arena.ReadUint32(dataOff + 12))
-
-	return &ZSkipList{
-		headerOff: hdrOff,
-		tailOff:   tailOff,
-		length:    length,
-		level:     level,
+func zslLoadFromArena(arena *Arena, dataOff int) ZSkipList {
+	return ZSkipList{
+		headerOff: int(arena.ReadUint32(dataOff)),
+		tailOff:   int(arena.ReadUint32(dataOff + 4)),
+		length:    int(arena.ReadUint32(dataOff + 8)),
+		level:     int(arena.ReadUint32(dataOff + 12)),
 	}
 }
 
-func (db *RedisDB) saveZSkipList(dataOff int, zsl *ZSkipList) {
-	db.arena.WriteUint32(dataOff, uint32(zsl.headerOff))
-	db.arena.WriteUint32(dataOff+4, uint32(zsl.tailOff))
-	db.arena.WriteUint32(dataOff+8, uint32(zsl.length))
-	db.arena.WriteUint32(dataOff+12, uint32(zsl.level))
+func zslSaveToArena(arena *Arena, dataOff int, zsl *ZSkipList) {
+	arena.WriteUint32(dataOff, uint32(zsl.headerOff))
+	arena.WriteUint32(dataOff+4, uint32(zsl.tailOff))
+	arena.WriteUint32(dataOff+8, uint32(zsl.length))
+	arena.WriteUint32(dataOff+12, uint32(zsl.level))
 }

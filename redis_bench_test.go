@@ -27,6 +27,8 @@ import (
 	"testing"
 )
 
+const benchKeyPool = 100
+
 func BenchmarkArenaAlloc(b *testing.B) {
 	a := NewArena(16 * 4096 * 1024)
 	b.ResetTimer()
@@ -36,15 +38,12 @@ func BenchmarkArenaAlloc(b *testing.B) {
 }
 
 func BenchmarkArenaAllocFree(b *testing.B) {
-	a := NewArena(16 * 4096 * 1024)
-	offs := make([]int, b.N)
-	for i := 0; i < b.N; i++ {
-		offs[i] = a.Alloc(64)
-	}
+	a := NewArena(4096)
+	off := a.Alloc(64)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		a.Free(offs[i])
-		a.Alloc(64)
+		a.Free(off)
+		off = a.Alloc(64)
 	}
 }
 
@@ -61,48 +60,44 @@ func BenchmarkArenaReadWrite(b *testing.B) {
 func BenchmarkDictSet(b *testing.B) {
 	a := NewArena(16 * 4096 * 1024)
 	d := NewDict(a)
-	keys := make([][]byte, b.N)
-	for i := 0; i < b.N; i++ {
-		keys[i] = []byte(fmt.Sprintf("key%d", i))
+	keys := make([][]byte, benchKeyPool)
+	for i := 0; i < benchKeyPool; i++ {
+		keys[i] = []byte(fmt.Sprintf("k%d", i))
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		d.Set(keys[i], i)
+		d.Set(keys[i%benchKeyPool], i)
 	}
 }
 
 func BenchmarkDictGet(b *testing.B) {
 	a := NewArena(16 * 4096 * 1024)
 	d := NewDict(a)
-	for i := 0; i < 10000; i++ {
-		d.Set([]byte(fmt.Sprintf("key%d", i)), i)
+	for i := 0; i < benchKeyPool; i++ {
+		d.Set([]byte(fmt.Sprintf("k%d", i)), i)
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		idx := i % 10000
-		d.Get([]byte(fmt.Sprintf("key%d", idx)))
+		d.Get([]byte(fmt.Sprintf("k%d", i%benchKeyPool)))
 	}
 }
 
 func BenchmarkDictDel(b *testing.B) {
-	a := NewArena(16 * 4096 * 1024)
+	a := NewArena(4096)
 	d := NewDict(a)
-	for i := 0; i < b.N; i++ {
-		d.Set([]byte(fmt.Sprintf("key%d", i)), i)
-	}
+	d.Set([]byte("key"), 100)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		d.Del([]byte(fmt.Sprintf("key%d", i)))
+		d.Del([]byte("key"))
+		d.Set([]byte("key"), 100)
 	}
 }
 
 func BenchmarkRedisSet(b *testing.B) {
+	db := New()
 	val := []byte("hello world value for benchmark")
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		b.StopTimer()
-		db := New()
-		b.StartTimer()
 		db.Set("key", val)
 	}
 }
@@ -110,24 +105,23 @@ func BenchmarkRedisSet(b *testing.B) {
 func BenchmarkRedisGet(b *testing.B) {
 	db := New()
 	val := []byte("hello world value for benchmark")
-	for i := 0; i < 10000; i++ {
+	for i := 0; i < benchKeyPool; i++ {
 		db.Set(fmt.Sprintf("key%d", i), val)
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		db.Get(fmt.Sprintf("key%d", i%10000))
+		db.Get(fmt.Sprintf("key%d", i%benchKeyPool))
 	}
 }
 
 func BenchmarkRedisDel(b *testing.B) {
+	db := New()
 	val := []byte("hello world value for benchmark")
+	db.Set("key", val)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		b.StopTimer()
-		db := New()
-		db.Set("key", val)
-		b.StartTimer()
 		db.Del("key")
+		db.Set("key", val)
 	}
 }
 
@@ -140,168 +134,155 @@ func BenchmarkRedisIncrBy(b *testing.B) {
 }
 
 func BenchmarkRedisLPush(b *testing.B) {
+	db := New()
 	val := []byte("hello")
+	db.LPush("mylist", val)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		b.StopTimer()
-		db := New()
-		b.StartTimer()
 		db.LPush("mylist", val)
-	}
-}
-
-func BenchmarkRedisLPop(b *testing.B) {
-	val := []byte("hello")
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		b.StopTimer()
-		db := New()
-		for j := 0; j < 100; j++ {
-			db.LPush("mylist", val)
-		}
-		b.StartTimer()
-		db.LPop("mylist")
-	}
-}
-
-func BenchmarkRedisRPush(b *testing.B) {
-	val := []byte("hello")
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		b.StopTimer()
-		db := New()
-		b.StartTimer()
-		db.RPush("mylist", val)
-	}
-}
-
-func BenchmarkRedisRPop(b *testing.B) {
-	val := []byte("hello")
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		b.StopTimer()
-		db := New()
-		for j := 0; j < 100; j++ {
-			db.RPush("mylist", val)
-		}
-		b.StartTimer()
 		db.RPop("mylist")
 	}
 }
 
-func BenchmarkRedisHSet(b *testing.B) {
-	val := []byte("value")
+func BenchmarkRedisLPop(b *testing.B) {
+	db := New()
+	val := []byte("hello")
+	db.LPush("mylist", val)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		b.StopTimer()
-		db := New()
-		b.StartTimer()
-		db.HSet("hash", "field", val)
+		db.LPop("mylist")
+		db.LPush("mylist", val)
 	}
 }
 
-func BenchmarkRedisHGet(b *testing.B) {
+func BenchmarkRedisRPush(b *testing.B) {
 	db := New()
-	for i := 0; i < 10000; i++ {
-		db.HSet("hash", fmt.Sprintf("field%d", i), []byte("value"))
-	}
+	val := []byte("hello")
+	db.RPush("mylist", val)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		db.HGet("hash", fmt.Sprintf("field%d", i%10000))
+		db.RPush("mylist", val)
+		db.LPop("mylist")
+	}
+}
+
+func BenchmarkRedisRPop(b *testing.B) {
+	db := New()
+	val := []byte("hello")
+	db.RPush("mylist", val)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		db.RPop("mylist")
+		db.RPush("mylist", val)
+	}
+}
+
+func BenchmarkRedisHSet(b *testing.B) {
+	db := New()
+	val := []byte("value")
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		db.HSet("hash", "field", val)
 	}
 }
 
 func BenchmarkRedisHDel(b *testing.B) {
+	db := New()
 	val := []byte("value")
+	db.HSet("hash", "field", val)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		b.StopTimer()
-		db := New()
-		db.HSet("hash", "field", val)
-		b.StartTimer()
 		db.HDel("hash", "field")
+		db.HSet("hash", "field", val)
+	}
+}
+func BenchmarkRedisHGet(b *testing.B) {
+	db := New()
+	for i := 0; i < benchKeyPool; i++ {
+		db.HSet("hash", fmt.Sprintf("field%d", i), []byte("value"))
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		db.HGet("hash", fmt.Sprintf("field%d", i%benchKeyPool))
 	}
 }
 
 func BenchmarkRedisHIncrBy(b *testing.B) {
 	db := New()
+	db.HSet("hash", "counter", []byte("0"))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		db.HIncrBy("hash", "counter", 1)
+		db.HIncrBy("hash", "counter", -1)
 	}
 }
 
 func BenchmarkRedisSAdd(b *testing.B) {
+	db := New()
 	val := []byte("member")
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		b.StopTimer()
-		db := New()
-		b.StartTimer()
+		db.SAdd("set", val)
+	}
+}
+
+func BenchmarkRedisSRem(b *testing.B) {
+	db := New()
+	val := []byte("member")
+	db.SAdd("set", val)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		db.SRem("set", val)
 		db.SAdd("set", val)
 	}
 }
 
 func BenchmarkRedisSIsMember(b *testing.B) {
 	db := New()
-	for i := 0; i < 10000; i++ {
-		db.SAdd("set", []byte(fmt.Sprintf("member%d", i)))
-	}
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		db.SIsMember("set", []byte(fmt.Sprintf("member%d", i%10000)))
-	}
-}
-
-func BenchmarkRedisSRem(b *testing.B) {
 	val := []byte("member")
+	db.SAdd("set", val)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		b.StopTimer()
-		db := New()
-		db.SAdd("set", val)
-		b.StartTimer()
-		db.SRem("set", val)
+		db.SIsMember("set", val)
 	}
 }
 
 func BenchmarkRedisZAdd(b *testing.B) {
+	db := New()
 	val := []byte("member")
+	db.ZAdd("zset", 1.0, val)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		b.StopTimer()
-		db := New()
-		b.StartTimer()
+		db.ZRem("zset", val)
 		db.ZAdd("zset", 1.0, val)
 	}
 }
 
 func BenchmarkRedisZScore(b *testing.B) {
 	db := New()
-	for i := 0; i < 10000; i++ {
+	for i := 0; i < benchKeyPool; i++ {
 		db.ZAdd("zset", float64(i), []byte(fmt.Sprintf("member%d", i)))
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		db.ZScore("zset", []byte(fmt.Sprintf("member%d", i%10000)))
+		db.ZScore("zset", []byte(fmt.Sprintf("member%d", i%benchKeyPool)))
 	}
 }
 
 func BenchmarkRedisZRem(b *testing.B) {
+	db := New()
 	val := []byte("member")
+	db.ZAdd("zset", 1.0, val)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		b.StopTimer()
-		db := New()
-		db.ZAdd("zset", 1.0, val)
-		b.StartTimer()
 		db.ZRem("zset", val)
+		db.ZAdd("zset", 1.0, val)
 	}
 }
 
 func BenchmarkRedisZRange(b *testing.B) {
 	db := New()
-	for i := 0; i < 10000; i++ {
+	for i := 0; i < benchKeyPool; i++ {
 		db.ZAdd("zset", float64(i), []byte(fmt.Sprintf("member%d", i)))
 	}
 	b.ResetTimer()
@@ -310,13 +291,24 @@ func BenchmarkRedisZRange(b *testing.B) {
 	}
 }
 
+func BenchmarkRedisZRangeIter(b *testing.B) {
+	db := New()
+	for i := 0; i < benchKeyPool; i++ {
+		db.ZAdd("zset", float64(i), []byte(fmt.Sprintf("member%d", i)))
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		db.ZRangeIter("zset", 0, 99, func(member []byte) {
+			_ = member
+		})
+	}
+}
+
 func BenchmarkRedisPFAdd(b *testing.B) {
+	db := New()
 	val := []byte("item")
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		b.StopTimer()
-		db := New()
-		b.StartTimer()
 		db.PFAdd("hll", val)
 	}
 }
@@ -333,23 +325,21 @@ func BenchmarkRedisPFCount(b *testing.B) {
 }
 
 func BenchmarkRedisSetBit(b *testing.B) {
+	db := New()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		b.StopTimer()
-		db := New()
-		b.StartTimer()
-		db.SetBit("bitmap", i%10000, 1)
+		db.SetBit("bitmap", 0, 1)
 	}
 }
 
 func BenchmarkRedisGetBit(b *testing.B) {
 	db := New()
-	for i := 0; i < 10000; i++ {
+	for i := 0; i < benchKeyPool; i++ {
 		db.SetBit("bitmap", i, 1)
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		db.GetBit("bitmap", i%10000)
+		db.GetBit("bitmap", i%benchKeyPool)
 	}
 }
 
@@ -365,12 +355,10 @@ func BenchmarkRedisBitCount(b *testing.B) {
 }
 
 func BenchmarkRedisBFAdd(b *testing.B) {
+	db := New()
+	db.BFReserve("bf", 0.01, 1000000)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		b.StopTimer()
-		db := New()
-		db.BFReserve("bf", 0.01, 1000000)
-		b.StartTimer()
 		db.BFAdd("bf", []byte("item"))
 	}
 }
@@ -378,12 +366,12 @@ func BenchmarkRedisBFAdd(b *testing.B) {
 func BenchmarkRedisBFExists(b *testing.B) {
 	db := New()
 	db.BFReserve("bf", 0.01, 1000000)
-	for i := 0; i < 10000; i++ {
+	for i := 0; i < benchKeyPool; i++ {
 		db.BFAdd("bf", []byte(fmt.Sprintf("item%d", i)))
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		db.BFExists("bf", []byte(fmt.Sprintf("item%d", i%10000)))
+		db.BFExists("bf", []byte(fmt.Sprintf("item%d", i%benchKeyPool)))
 	}
 }
 
@@ -392,19 +380,19 @@ func BenchmarkRedisCFAdd(b *testing.B) {
 	db.CFReserve("cf", 4096)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		db.CFAdd("cf", []byte(fmt.Sprintf("item%d", i)))
+		db.CFAdd("cf", []byte("item"))
 	}
 }
 
 func BenchmarkRedisCFExists(b *testing.B) {
 	db := New()
 	db.CFReserve("cf", 4096)
-	for i := 0; i < 10000; i++ {
+	for i := 0; i < benchKeyPool; i++ {
 		db.CFAdd("cf", []byte(fmt.Sprintf("item%d", i)))
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		db.CFExists("cf", []byte(fmt.Sprintf("item%d", i%10000)))
+		db.CFExists("cf", []byte(fmt.Sprintf("item%d", i%benchKeyPool)))
 	}
 }
 
@@ -428,12 +416,12 @@ func BenchmarkRedisTopKAdd(b *testing.B) {
 
 func BenchmarkRedisExists(b *testing.B) {
 	db := New()
-	for i := 0; i < 10000; i++ {
+	for i := 0; i < benchKeyPool; i++ {
 		db.Set(fmt.Sprintf("key%d", i), []byte("value"))
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		db.Exists(fmt.Sprintf("key%d", i%10000))
+		db.Exists(fmt.Sprintf("key%d", i%benchKeyPool))
 	}
 }
 
@@ -461,14 +449,14 @@ func BenchmarkRedisMixedRead(b *testing.B) {
 func BenchmarkRedisConcurrentRead(b *testing.B) {
 	db := New()
 	val := []byte("value")
-	for i := 0; i < 10000; i++ {
+	for i := 0; i < benchKeyPool; i++ {
 		db.Set(fmt.Sprintf("key%d", i), val)
 	}
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
-			db.Get(fmt.Sprintf("key%d", i%10000))
+			db.Get(fmt.Sprintf("key%d", i%benchKeyPool))
 			i++
 		}
 	})
@@ -481,7 +469,7 @@ func BenchmarkRedisConcurrentWrite(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
-			db.Set(fmt.Sprintf("key%d", i), val)
+			db.Set(fmt.Sprintf("key%d", i%benchKeyPool), val)
 			i++
 		}
 	})
