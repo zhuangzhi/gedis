@@ -20,6 +20,8 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+// HyperLogLog 实现，使用 16384 个 6 位寄存器进行基数估计。
+// 基于 MurmurHash64 哈希函数。
 package gedis
 
 import (
@@ -27,13 +29,14 @@ import (
 )
 
 const (
-	hllRegisters = 16384
-	hllPMask     = hllRegisters - 1
-	hllBits      = 6
-	hllBytes     = (hllRegisters * hllBits) / 8
+	hllRegisters = 16384        // 寄存器数量
+	hllPMask     = hllRegisters - 1 // 索引掩码
+	hllBits      = 6            // 每寄存器位数
+	hllBytes     = (hllRegisters * hllBits) / 8 // 寄存器总字节数
 )
 
-func (db *RedisDB) PFAdd(key string, elements ...[]byte) int {
+// PFAdd 向 HyperLogLog 中添加元素。返回实际更新的寄存器数量。
+func (db *RedisDB) PFAdd(key string, elements ...*PooledBuffer) int {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -60,7 +63,7 @@ func (db *RedisDB) PFAdd(key string, elements ...[]byte) int {
 
 	updated := 0
 	for _, elem := range elements {
-		hash := murmurHash64(elem)
+		hash := murmurHash64(elem.Bytes())
 		idx := int(hash & hllPMask)
 		runLen := countTrailingZeros(hash>>14) + 1
 		if runLen > 64 {
@@ -77,6 +80,7 @@ func (db *RedisDB) PFAdd(key string, elements ...[]byte) int {
 	return updated
 }
 
+// PFCount 估计 HyperLogLog 的基数。支持同时估算多个 key 的合并基数。
 func (db *RedisDB) PFCount(keys ...string) int64 {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -132,6 +136,7 @@ func (db *RedisDB) PFCount(keys ...string) int64 {
 	return result
 }
 
+// PFMerge 将多个 HyperLogLog 合并到目标 key 中。
 func (db *RedisDB) PFMerge(dest string, sources ...string) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -188,6 +193,7 @@ func (db *RedisDB) PFMerge(dest string, sources ...string) {
 	}
 }
 
+// hllGetRegister 读取指定索引处的 6 位寄存器值。
 func hllGetRegister(registers []byte, idx int) int {
 	if len(registers) == 0 {
 		return 0
@@ -210,6 +216,7 @@ func hllGetRegister(registers []byte, idx int) int {
 	return val
 }
 
+// hllSetRegister 设置指定索引处的 6 位寄存器值。
 func hllSetRegister(registers []byte, idx int, val int) {
 	if val > (1<<hllBits)-1 {
 		val = (1 << hllBits) - 1

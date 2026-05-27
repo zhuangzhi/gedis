@@ -20,6 +20,8 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+// Ziplist 是一个紧凑的双向链表数据结构，所有条目连续存储在 Arena 中。
+// 每个条目由前驱长度（prevlen）、编码和数据组成，以 0xFF 结束标记。
 package gedis
 
 import "encoding/binary"

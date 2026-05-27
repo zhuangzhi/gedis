@@ -20,12 +20,14 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+// 图数据库（Graph）实现，支持节点、边的增删改查以及 Cypher 风格查询。
 package gedis
 
 import (
 	"strings"
 )
 
+// GraphNode 图节点，包含 ID、标签和属性。
 type GraphNode struct {
 	ID         string
 	Labels     []string
@@ -67,7 +69,9 @@ func (db *RedisDB) graphAddNode(graphName, nodeID string, labels []string, props
 
 	for _, label := range labels {
 		labelIdxKey := graphName + ":label:" + label
-		db.SAdd(labelIdxKey, []byte(nodeID))
+		pb := Buf(nodeID)
+		db.SAdd(labelIdxKey, pb)
+		pb.Close()
 	}
 }
 
@@ -93,8 +97,13 @@ func (db *RedisDB) graphAddEdge(graphName, edgeID, edgeType, sourceID, targetID 
 		db.dict.Set([]byte(edgeKey), headOff)
 	}
 
-	db.ZAdd(outKey, 0, []byte(edgeID))
-	db.ZAdd(inKey, 0, []byte(edgeID))
+	pb1 := Buf(edgeID)
+	db.ZAdd(outKey, 0, pb1)
+	pb1.Close()
+
+	pb2 := Buf(edgeID)
+	db.ZAdd(inKey, 0, pb2)
+	pb2.Close()
 }
 
 func (db *RedisDB) GraphQuery(graphName, cypher string) ([]GraphResult, error) {
@@ -224,7 +233,7 @@ func (db *RedisDB) getNodeIDsByLabel(graphName, label string) []string {
 	members := db.SMembers(labelIdxKey)
 	result := make([]string, len(members))
 	for i, m := range members {
-		result[i] = string(m)
+		result[i] = m.String()
 	}
 	return result
 }

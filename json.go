@@ -20,6 +20,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+// JSON 文档操作实现，支持路径读写和 JSONPath 风格的字段访问。
 package gedis
 
 import (
@@ -28,6 +29,7 @@ import (
 	"strings"
 )
 
+// JsonSet 在 JSON 文档中设置指定路径的值。
 func (db *RedisDB) JsonSet(key string, path string, value interface{}) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -84,6 +86,7 @@ func (db *RedisDB) JsonSet(key string, path string, value interface{}) error {
 	return nil
 }
 
+// JsonGet 获取 JSON 文档中指定路径的值。
 func (db *RedisDB) JsonGet(key string, path string) (interface{}, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -115,6 +118,7 @@ func (db *RedisDB) JsonGet(key string, path string) (interface{}, error) {
 	return jsonGetPath(doc, parts), nil
 }
 
+// JsonDel 删除 JSON 文档中指定路径的值。
 func (db *RedisDB) JsonDel(key string, path string) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()

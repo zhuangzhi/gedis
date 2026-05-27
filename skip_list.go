@@ -20,15 +20,18 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+// 跳跃表（Skip List）实现，用于有序集合（ZSet）的数据存储。
+// 所有节点数据存储在 Arena 中，通过整数偏移量引用，避免 GC 压力。
 package gedis
 
 import "math/rand"
 
 const (
-	zskiplistMaxLevel = 32
-	zskiplistP        = 0.25
+	zskiplistMaxLevel = 32   // 跳跃表最大层数
+	zskiplistP        = 0.25 // 层级提升概率
 )
 
+// ZSkipList 跳跃表结构体，记录头节点、尾节点偏移量和节点数量。
 type ZSkipList struct {
 	headerOff int
 	tailOff   int
@@ -36,6 +39,7 @@ type ZSkipList struct {
 	level     int
 }
 
+// zslNodeMemberOff 返回跳跃表节点中 member 字段的偏移量。
 func zslNodeMemberOff(arena *Arena, nodeOff int) int {
 	return nodeOff
 }
@@ -68,6 +72,7 @@ func zslNodeSize(levelCount int) int {
 	return 18 + levelCount*8
 }
 
+// zslCreate 创建一个新的跳跃表，分配并初始化头节点。
 func zslCreate(arena *Arena) ZSkipList {
 	headerSize := zslNodeSize(zskiplistMaxLevel)
 	headerOff := arena.Alloc(headerSize)
@@ -90,6 +95,7 @@ func zslCreate(arena *Arena) ZSkipList {
 	}
 }
 
+// zslRandomLevel 按概率随机生成跳跃表节点层级。
 func zslRandomLevel() int {
 	level := 1
 	for rand.Float64() < zskiplistP && level < zskiplistMaxLevel {
@@ -98,6 +104,7 @@ func zslRandomLevel() int {
 	return level
 }
 
+// zslInsert 向跳跃表中插入一个节点。若 member 已存在则返回 0。
 func zslInsert(arena *Arena, zsl *ZSkipList, memberOff int, score float64) int {
 	var update [zskiplistMaxLevel]int
 	var rank [zskiplistMaxLevel]int
@@ -181,6 +188,7 @@ func zslInsert(arena *Arena, zsl *ZSkipList, memberOff int, score float64) int {
 	return nodeOff
 }
 
+// zslDelete 从跳跃表中删除指定 member 和 score 的节点。
 func zslDelete(arena *Arena, zsl *ZSkipList, memberOff int, score float64) bool {
 	var update [zskiplistMaxLevel]int
 
@@ -227,6 +235,7 @@ func zslDelete(arena *Arena, zsl *ZSkipList, memberOff int, score float64) bool 
 	return true
 }
 
+// zslDeleteNode 删除跳跃表中指定节点，更新前向和后向指针。
 func zslDeleteNode(arena *Arena, zsl *ZSkipList, nodeOff int, update []int) {
 	level := int(arena.ReadUint16(zslNodeLevelCountOff(arena, nodeOff)))
 	for i := 0; i < level; i++ {
@@ -263,6 +272,7 @@ func zslDeleteNode(arena *Arena, zsl *ZSkipList, nodeOff int, update []int) {
 	arena.Free(nodeOff)
 }
 
+// zslGetRank 返回指定 member 和 score 对应的节点排名（从 1 开始）。
 func zslGetRank(arena *Arena, zsl *ZSkipList, memberOff int, score float64) int {
 	rank := 0
 	x := zsl.headerOff
@@ -294,6 +304,7 @@ func zslGetRank(arena *Arena, zsl *ZSkipList, memberOff int, score float64) int 
 	return 0
 }
 
+// zslGetElementByRank 返回指定排名的节点偏移量。
 func zslGetElementByRank(arena *Arena, zsl *ZSkipList, rank int) int {
 	traversed := 0
 	x := zsl.headerOff

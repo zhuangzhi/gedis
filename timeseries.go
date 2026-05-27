@@ -20,8 +20,11 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+// 时间序列（TimeSeries）实现，使用分块（Chunk）存储采样数据。
+// 每个 Chunk 可存储多个时间戳-值的采样点。
 package gedis
 
+// TSPoint 时间序列数据点，包含时间戳和值。
 type TSPoint struct {
 	Timestamp int64
 	Value     float64
@@ -49,6 +52,7 @@ func tsChunkMinTs(chunkOff int) int     { return chunkOff + 12 }
 func tsChunkMaxTs(chunkOff int) int     { return chunkOff + 20 }
 func tsChunkSamples(chunkOff int) int   { return chunkOff + tsChunkBaseSize }
 
+// TSAdd 向时间序列添加一个采样点。
 func (db *RedisDB) TSAdd(key string, ts int64, val float64) int {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -102,6 +106,7 @@ func (db *RedisDB) TSAdd(key string, ts int64, val float64) int {
 	return int(totalCount + 1)
 }
 
+// TSRange 查询时间序列在指定时间范围内的采样点。
 func (db *RedisDB) TSRange(key string, startTs, endTs int64) []TSPoint {
 	db.mu.RLock()
 	defer db.mu.RUnlock()

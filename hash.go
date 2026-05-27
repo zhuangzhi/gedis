@@ -24,7 +24,7 @@ package gedis
 
 import "strconv"
 
-func (db *RedisDB) HSet(key string, field string, value []byte) int {
+func (db *RedisDB) HSet(key string, field string, value *PooledBuffer) int {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -34,7 +34,7 @@ func (db *RedisDB) HSet(key string, field string, value []byte) int {
 	if !ok {
 		zlOff := ziplistNew(db.arena)
 		zlOff = ziplistInsert(db.arena, zlOff, []byte(field), false)
-		zlOff = ziplistInsert(db.arena, zlOff, value, false)
+		zlOff = ziplistInsert(db.arena, zlOff, value.Bytes(), false)
 		headOff = db.NewObject(ObjHash, ObjEncodingZiplist, zlOff)
 		db.dict.Set(keyBytes, headOff)
 		return 1
@@ -50,14 +50,14 @@ func (db *RedisDB) HSet(key string, field string, value []byte) int {
 			f := ziplistGet(db.arena, zlOff, i)
 			if string(f) == field {
 				zlOff = ziplistDelete(db.arena, zlOff, i+1)
-				zlOff = ziplistInsertAt(db.arena, zlOff, i+1, value)
+				zlOff = ziplistInsertAt(db.arena, zlOff, i+1, value.Bytes())
 				db.ObjectSetDataOffset(headOff, zlOff)
 				return 0
 			}
 		}
 
 		zlOff = ziplistInsert(db.arena, zlOff, []byte(field), false)
-		zlOff = ziplistInsert(db.arena, zlOff, value, false)
+		zlOff = ziplistInsert(db.arena, zlOff, value.Bytes(), false)
 		db.ObjectSetDataOffset(headOff, zlOff)
 		return 1
 	}
@@ -65,7 +65,7 @@ func (db *RedisDB) HSet(key string, field string, value []byte) int {
 	return 0
 }
 
-func (db *RedisDB) HGet(key string, field string) ([]byte, bool) {
+func (db *RedisDB) HGet(key string, field string) (*PooledBuffer, bool) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -84,7 +84,10 @@ func (db *RedisDB) HGet(key string, field string) ([]byte, bool) {
 		pos := zlOff + ziplistHeaderSize
 		for i := 0; i < n; i += 2 {
 			if ziplistEntryDataEquals(db.arena, pos, []byte(field)) {
-				return ziplistGet(db.arena, zlOff, i+1), true
+				val := ziplistGet(db.arena, zlOff, i+1)
+				pb := NewBuf(len(val))
+				pb.buf.Write(val)
+				return pb, true
 			}
 			pos += ziplistEntryTotalSize(db.arena, pos)
 			pos += ziplistEntryTotalSize(db.arena, pos)
@@ -136,7 +139,7 @@ func (db *RedisDB) HDel(key string, fields ...string) int {
 	return 0
 }
 
-func (db *RedisDB) HGetAll(key string) map[string][]byte {
+func (db *RedisDB) HGetAll(key string) map[string]*PooledBuffer {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -152,11 +155,13 @@ func (db *RedisDB) HGetAll(key string) map[string][]byte {
 	if enc == ObjEncodingZiplist {
 		zlOff := dataOff
 		n := ziplistLen(db.arena, zlOff)
-		result := make(map[string][]byte, n/2)
+		result := make(map[string]*PooledBuffer, n/2)
 		for i := 0; i < n; i += 2 {
 			f := ziplistGet(db.arena, zlOff, i)
 			v := ziplistGet(db.arena, zlOff, i+1)
-			result[string(f)] = v
+			pb := NewBuf(len(v))
+			pb.buf.Write(v)
+			result[string(f)] = pb
 		}
 		return result
 	}
@@ -260,47 +265,22 @@ func ziplistInsertAt(arena *Arena, zlOff int, index int, data []byte) int {
 		relInsertPos += ziplistEntryTotalSize(arena, oldZlOff+relInsertPos)
 	}
 
-	var prevLen int
-	if index > 0 {
-		relPrevPos := ziplistHeaderSize
-		for i := 0; i < index-1; i++ {
-			relPrevPos += ziplistEntryTotalSize(arena, oldZlOff+relPrevPos)
-		}
-		prevLen = ziplistEntryTotalSize(arena, oldZlOff+relPrevPos)
-	} else {
-		prevLen = 0
+	tmpArena := NewArena(256)
+	tmpZl := ziplistNew(tmpArena)
+	for i := 0; i < index; i++ {
+		entry := ziplistGet(arena, oldZlOff, i)
+		tmpZl = ziplistInsert(tmpArena, tmpZl, entry, false)
+	}
+	tmpZl = ziplistInsert(tmpArena, tmpZl, data, false)
+	for i := index; i < n; i++ {
+		entry := ziplistGet(arena, oldZlOff, i)
+		tmpZl = ziplistInsert(tmpArena, tmpZl, entry, false)
 	}
 
-	entrySize := ziplistEntrySize(prevLen, data)
+	newSize := tmpZl + ziplistTotalBytes(tmpArena, tmpZl)
+	newData := tmpArena.ReadBytes(0, newSize)
+	newOff := arena.AllocBytes(newData)
 
-	oldSize := ziplistTotalBytes(arena, zlOff)
-	newSize := oldSize + entrySize
-	zlOff = ziplistResize(arena, zlOff, newSize)
-
-	absInsertPos := zlOff + relInsertPos
-
-	remainSize := oldSize - relInsertPos - 1
-	if remainSize > 0 {
-		src := arena.ReadBytes(absInsertPos, remainSize)
-		arena.WriteBytes(absInsertPos+entrySize, src)
-	}
-
-	ziplistWriteEntry(arena, absInsertPos, prevLen, data)
-
-	if index < n {
-		nextEntryOff := absInsertPos + entrySize
-		if nextEntryOff < zlOff+newSize-1 {
-			ziplistWritePrevLen(arena, nextEntryOff, entrySize)
-		}
-	}
-
-	ziplistSetNumEntries(arena, zlOff, n+1)
-	if index >= n {
-		ziplistSetTailOffset(arena, zlOff, relInsertPos)
-	} else {
-		ziplistSetTailOffset(arena, zlOff, ziplistTailOffset(arena, zlOff)+entrySize)
-	}
-
-	return zlOff
+	arena.Free(oldZlOff)
+	return newOff
 }
-

@@ -20,6 +20,8 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+// 全文搜索（Full-Text Search）实现，基于倒排索引。
+// 支持索引创建、文档添加和关键词搜索。
 package gedis
 
 import "strings"
@@ -94,20 +96,26 @@ func (db *RedisDB) FTSearch(index string, query string, limit int) []string {
 		return nil
 	}
 
+	schema := db.getSearchIndex(index)
+
 	var result []string
 	first := true
 
 	for _, term := range terms {
-		termKey := strings.ToLower(index + ":inv:*:" + term)
-
 		var matchingDocs []string
+		seen := make(map[string]bool)
 
-		for i := 0; i < 1000; i++ {
+		for field := range schema {
+			termKey := strings.ToLower(index + ":inv:" + field + ":" + term)
 			headOff, ok := db.dict.Get([]byte(termKey))
 			if ok {
 				docs := db.readPostingList(headOff)
-				matchingDocs = append(matchingDocs, docs...)
-				break
+				for _, d := range docs {
+					if !seen[d] {
+						seen[d] = true
+						matchingDocs = append(matchingDocs, d)
+					}
+				}
 			}
 		}
 

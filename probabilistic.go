@@ -20,6 +20,8 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+// 概率数据结构实现，包含布隆过滤器（Bloom Filter）、布谷鸟过滤器（Cuckoo Filter）、
+// Count-Min Sketch 和 Top-K 等近似算法。
 package gedis
 
 import "math"
@@ -55,7 +57,7 @@ func (db *RedisDB) BFReserve(key string, errorRate float64, capacity int) {
 	db.dict.Set(keyBytes, headOff)
 }
 
-func (db *RedisDB) BFAdd(key string, item []byte) bool {
+func (db *RedisDB) BFAdd(key string, item *PooledBuffer) bool {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -79,7 +81,7 @@ func (db *RedisDB) BFAdd(key string, item []byte) bool {
 
 	alreadyExists := true
 	for i := 0; i < k; i++ {
-		h := bfHash(item, i, n)
+		h := bfHash(item.Bytes(), i, n)
 		byteIdx := bitArrayOff + h/8
 		bitIdx := h % 8
 		b := db.arena.ReadByte(byteIdx)
@@ -95,7 +97,7 @@ func (db *RedisDB) BFAdd(key string, item []byte) bool {
 	return true
 }
 
-func (db *RedisDB) BFExists(key string, item []byte) bool {
+func (db *RedisDB) BFExists(key string, item *PooledBuffer) bool {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -110,7 +112,7 @@ func (db *RedisDB) BFExists(key string, item []byte) bool {
 	bitArrayOff := dataOff + 8
 
 	for i := 0; i < k; i++ {
-		h := bfHash(item, i, n)
+		h := bfHash(item.Bytes(), i, n)
 		byteIdx := bitArrayOff + h/8
 		bitIdx := h % 8
 		b := db.arena.ReadByte(byteIdx)
@@ -185,7 +187,7 @@ func (db *RedisDB) CFReserve(key string, capacity int) {
 	db.dict.Set(keyBytes, headOff)
 }
 
-func (db *RedisDB) CFAdd(key string, item []byte) bool {
+func (db *RedisDB) CFAdd(key string, item *PooledBuffer) bool {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -200,8 +202,8 @@ func (db *RedisDB) CFAdd(key string, item []byte) bool {
 	numBuckets := int(db.arena.ReadUint32(dataOff))
 	bucketsOff := dataOff + 4
 
-	fp := cfFingerprint(item)
-	i1 := int(fnv32(item) % uint32(numBuckets))
+	fp := cfFingerprint(item.Bytes())
+	i1 := int(fnv32(item.Bytes()) % uint32(numBuckets))
 	i2 := i1 ^ int(fnv32U16(fp)%uint32(numBuckets))
 
 	if cfInsertBucket(db.arena, bucketsOff, numBuckets, i1, fp) {
@@ -231,7 +233,7 @@ func (db *RedisDB) CFAdd(key string, item []byte) bool {
 	return false
 }
 
-func (db *RedisDB) CFDel(key string, item []byte) bool {
+func (db *RedisDB) CFDel(key string, item *PooledBuffer) bool {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -244,8 +246,8 @@ func (db *RedisDB) CFDel(key string, item []byte) bool {
 	numBuckets := int(db.arena.ReadUint32(dataOff))
 	bucketsOff := dataOff + 4
 
-	fp := cfFingerprint(item)
-	i1 := int(fnv32(item) % uint32(numBuckets))
+	fp := cfFingerprint(item.Bytes())
+	i1 := int(fnv32(item.Bytes()) % uint32(numBuckets))
 	i2 := i1 ^ int(fnv32U16(fp)%uint32(numBuckets))
 
 	if cfRemoveFromBucket(db.arena, bucketsOff, i1, fp) {
@@ -258,7 +260,7 @@ func (db *RedisDB) CFDel(key string, item []byte) bool {
 	return false
 }
 
-func (db *RedisDB) CFExists(key string, item []byte) bool {
+func (db *RedisDB) CFExists(key string, item *PooledBuffer) bool {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -271,8 +273,8 @@ func (db *RedisDB) CFExists(key string, item []byte) bool {
 	numBuckets := int(db.arena.ReadUint32(dataOff))
 	bucketsOff := dataOff + 4
 
-	fp := cfFingerprint(item)
-	i1 := int(fnv32(item) % uint32(numBuckets))
+	fp := cfFingerprint(item.Bytes())
+	i1 := int(fnv32(item.Bytes()) % uint32(numBuckets))
 	i2 := i1 ^ int(fnv32U16(fp)%uint32(numBuckets))
 
 	if cfFindInBucket(db.arena, bucketsOff, i1, fp) {
@@ -361,7 +363,7 @@ func (db *RedisDB) CMSInitByDim(key string, width, depth int) {
 	db.dict.Set(keyBytes, headOff)
 }
 
-func (db *RedisDB) CMSIncrBy(key string, item []byte, inc int) int {
+func (db *RedisDB) CMSIncrBy(key string, item *PooledBuffer, inc int) int {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -378,7 +380,7 @@ func (db *RedisDB) CMSIncrBy(key string, item []byte, inc int) int {
 	countersOff := dataOff + 8
 
 	minVal := int(^uint32(0) >> 1)
-	baseH := fnv32(item)
+	baseH := fnv32(item.Bytes())
 
 	for d := 0; d < depth; d++ {
 		h := int(((baseH ^ uint32(d)) * 16777619) % uint32(width))
@@ -393,7 +395,7 @@ func (db *RedisDB) CMSIncrBy(key string, item []byte, inc int) int {
 	return minVal
 }
 
-func (db *RedisDB) CMSQuery(key string, items ...[]byte) []int {
+func (db *RedisDB) CMSQuery(key string, items ...*PooledBuffer) []int {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -412,7 +414,7 @@ func (db *RedisDB) CMSQuery(key string, items ...[]byte) []int {
 
 	for idx, item := range items {
 		minVal := int(^uint32(0) >> 1)
-		baseH := fnv32(item)
+		baseH := fnv32(item.Bytes())
 		for d := 0; d < depth; d++ {
 			h := int(((baseH ^ uint32(d)) * 16777619) % uint32(width))
 			val := int(db.arena.ReadUint32(countersOff + (d*width+h)*4))

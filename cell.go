@@ -20,10 +20,12 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+// 速率限制（Cell/Rate Limiting）实现，基于令牌桶（Token Bucket）算法。
 package gedis
 
 import "time"
 
+// ThrottleResult 速率限制检查结果。
 type ThrottleResult struct {
 	Allowed   bool
 	Remaining int64

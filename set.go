@@ -26,7 +26,13 @@ import (
 	"encoding/binary"
 )
 
-func (db *RedisDB) SAdd(key string, members ...[]byte) int {
+func setValToBuf(val []byte) *PooledBuffer {
+	pb := NewBuf(len(val))
+	pb.buf.Write(val)
+	return pb
+}
+
+func (db *RedisDB) SAdd(key string, members ...*PooledBuffer) int {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -38,7 +44,7 @@ func (db *RedisDB) SAdd(key string, members ...[]byte) int {
 			isOff := intsetNew(db.arena)
 			added := 0
 			for _, m := range members {
-				val := int64(binary.LittleEndian.Uint64(m))
+				val := int64(binary.LittleEndian.Uint64(m.Bytes()))
 				if intsetAdd(db.arena, &isOff, val) {
 					added++
 				}
@@ -51,8 +57,9 @@ func (db *RedisDB) SAdd(key string, members ...[]byte) int {
 		innerDict := NewDict(db.arena)
 		added := 0
 		for _, m := range members {
-			if _, ok := innerDict.Get(m); !ok {
-				innerDict.Set(m, 0)
+			mb := m.Bytes()
+			if _, ok := innerDict.Get(mb); !ok {
+				innerDict.Set(mb, 0)
 				added++
 			}
 		}
@@ -70,7 +77,7 @@ func (db *RedisDB) SAdd(key string, members ...[]byte) int {
 		isOff := dataOff
 		added := 0
 		for _, m := range members {
-			val := int64(binary.LittleEndian.Uint64(m))
+			val := int64(binary.LittleEndian.Uint64(m.Bytes()))
 			if intsetAdd(db.arena, &isOff, val) {
 				added++
 			}
@@ -83,8 +90,9 @@ func (db *RedisDB) SAdd(key string, members ...[]byte) int {
 		innerDict := LoadDictMeta(db.arena, dataOff)
 		added := 0
 		for _, m := range members {
-			if _, ok := innerDict.Get(m); !ok {
-				innerDict.Set(m, 0)
+			mb := m.Bytes()
+			if _, ok := innerDict.Get(mb); !ok {
+				innerDict.Set(mb, 0)
 				added++
 			}
 		}
@@ -94,7 +102,7 @@ func (db *RedisDB) SAdd(key string, members ...[]byte) int {
 	return 0
 }
 
-func (db *RedisDB) SRem(key string, members ...[]byte) int {
+func (db *RedisDB) SRem(key string, members ...*PooledBuffer) int {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -111,7 +119,7 @@ func (db *RedisDB) SRem(key string, members ...[]byte) int {
 		isOff := dataOff
 		removed := 0
 		for _, m := range members {
-			val := int64(binary.LittleEndian.Uint64(m))
+			val := int64(binary.LittleEndian.Uint64(m.Bytes()))
 			if intsetRemove(db.arena, &isOff, val) {
 				removed++
 			}
@@ -128,7 +136,7 @@ func (db *RedisDB) SRem(key string, members ...[]byte) int {
 		innerDict := LoadDictMeta(db.arena, dataOff)
 		removed := 0
 		for _, m := range members {
-			if innerDict.Del(m) {
+			if innerDict.Del(m.Bytes()) {
 				removed++
 			}
 		}
@@ -138,7 +146,7 @@ func (db *RedisDB) SRem(key string, members ...[]byte) int {
 	return 0
 }
 
-func (db *RedisDB) SIsMember(key string, member []byte) bool {
+func (db *RedisDB) SIsMember(key string, member *PooledBuffer) bool {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -150,22 +158,23 @@ func (db *RedisDB) SIsMember(key string, member []byte) bool {
 
 	enc := db.ObjectEncoding(headOff)
 	dataOff := db.ObjectDataOffset(headOff)
+	mb := member.Bytes()
 
 	if enc == ObjEncodingIntset {
-		val := int64(binary.LittleEndian.Uint64(member))
+		val := int64(binary.LittleEndian.Uint64(mb))
 		return intsetFind(db.arena, dataOff, val)
 	}
 
 	if enc == ObjEncodingHashtable {
 		innerDict := LoadDictMeta(db.arena, dataOff)
-		_, ok := innerDict.Get(member)
+		_, ok := innerDict.Get(mb)
 		return ok
 	}
 
 	return false
 }
 
-func (db *RedisDB) SMembers(key string) [][]byte {
+func (db *RedisDB) SMembers(key string) []*PooledBuffer {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -181,25 +190,25 @@ func (db *RedisDB) SMembers(key string) [][]byte {
 	if enc == ObjEncodingIntset {
 		isOff := dataOff
 		n := intsetLen(db.arena, isOff)
-		result := make([][]byte, 0, n)
+		result := make([]*PooledBuffer, 0, n)
 		for i := 0; i < n; i++ {
 			val := intsetGet(db.arena, isOff, i)
 			buf := make([]byte, 8)
 			binary.LittleEndian.PutUint64(buf, uint64(val))
-			result = append(result, buf)
+			result = append(result, setValToBuf(buf))
 		}
 		return result
 	}
 
 	if enc == ObjEncodingHashtable {
 		innerDict := LoadDictMeta(db.arena, dataOff)
-		result := make([][]byte, 0)
+		result := make([]*PooledBuffer, 0)
 		for i := 0; i < innerDict.size; i++ {
 			kOff, _ := innerDict.getSlot(i)
 			if kOff != 0 {
 				size := db.arena.SizeAt(kOff)
 				key := db.arena.ReadBytes(kOff, size)
-				result = append(result, key)
+				result = append(result, setValToBuf(key))
 			}
 		}
 		return result
@@ -233,7 +242,7 @@ func (db *RedisDB) SCard(key string) int {
 	return 0
 }
 
-func (db *RedisDB) SInter(keys ...string) [][]byte {
+func (db *RedisDB) SInter(keys ...string) []*PooledBuffer {
 	if len(keys) == 0 {
 		return nil
 	}
@@ -241,7 +250,7 @@ func (db *RedisDB) SInter(keys ...string) [][]byte {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
-	var result [][]byte
+	var result []*PooledBuffer
 	first := true
 
 	for _, key := range keys {
@@ -254,12 +263,12 @@ func (db *RedisDB) SInter(keys ...string) [][]byte {
 
 		set := make(map[string]bool, len(members))
 		for _, m := range members {
-			set[string(m)] = true
+			set[m.String()] = true
 		}
 
-		filtered := make([][]byte, 0)
+		filtered := make([]*PooledBuffer, 0)
 		for _, m := range result {
-			if set[string(m)] {
+			if set[m.String()] {
 				filtered = append(filtered, m)
 			}
 		}
@@ -269,16 +278,16 @@ func (db *RedisDB) SInter(keys ...string) [][]byte {
 	return result
 }
 
-func (db *RedisDB) SUnion(keys ...string) [][]byte {
+func (db *RedisDB) SUnion(keys ...string) []*PooledBuffer {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
 	seen := make(map[string]bool)
-	var result [][]byte
+	var result []*PooledBuffer
 
 	for _, key := range keys {
 		for _, m := range db.SMembers(key) {
-			s := string(m)
+			s := m.String()
 			if !seen[s] {
 				seen[s] = true
 				result = append(result, m)
@@ -289,9 +298,9 @@ func (db *RedisDB) SUnion(keys ...string) [][]byte {
 	return result
 }
 
-func allInts(members [][]byte) bool {
+func allInts(members []*PooledBuffer) bool {
 	for _, m := range members {
-		if len(m) != 8 {
+		if m.Len() != 8 {
 			return false
 		}
 	}

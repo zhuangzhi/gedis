@@ -1,25 +1,3 @@
-// MIT License
-//
-// Copyright (c) 2026 Gedis Authors
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-// SOFTWARE.
-
 package gedis
 
 import (
@@ -27,6 +5,10 @@ import (
 	"sync"
 	"testing"
 )
+
+// ============================================================================
+// Arena & Dict (no API changes needed)
+// ============================================================================
 
 func TestArenaAllocFree(t *testing.T) {
 	a := NewArena(256)
@@ -118,14 +100,19 @@ func TestDictRehash(t *testing.T) {
 	}
 }
 
+// ============================================================================
+// Strings
+// ============================================================================
+
 func TestSetGet(t *testing.T) {
 	db := New()
-	db.Set("hello", []byte("world"))
+	db.Set("hello", Buf("world"))
 
 	val, ok := db.Get("hello")
-	if !ok || string(val) != "world" {
-		t.Fatalf("expected 'world', got '%s', ok=%v", string(val), ok)
+	if !ok || val.String() != "world" {
+		t.Fatalf("expected 'world', got '%s', ok=%v", val.String(), ok)
 	}
+	val.Close()
 
 	_, ok = db.Get("nonexistent")
 	if ok {
@@ -135,8 +122,8 @@ func TestSetGet(t *testing.T) {
 
 func TestDel(t *testing.T) {
 	db := New()
-	db.Set("key1", []byte("val1"))
-	db.Set("key2", []byte("val2"))
+	db.Set("key1", Buf("val1"))
+	db.Set("key2", Buf("val2"))
 
 	if !db.Del("key1") {
 		t.Fatal("expected delete to succeed")
@@ -151,25 +138,26 @@ func TestDel(t *testing.T) {
 
 func TestAppend(t *testing.T) {
 	db := New()
-	n := db.Append("key", []byte("hello"))
+	n := db.Append("key", Buf("hello"))
 	if n != 5 {
 		t.Fatalf("expected len 5, got %d", n)
 	}
 
-	n = db.Append("key", []byte(" world"))
+	n = db.Append("key", Buf(" world"))
 	if n != 11 {
 		t.Fatalf("expected len 11, got %d", n)
 	}
 
 	val, _ := db.Get("key")
-	if string(val) != "hello world" {
-		t.Fatalf("expected 'hello world', got '%s'", string(val))
+	if val.String() != "hello world" {
+		t.Fatalf("expected 'hello world', got '%s'", val.String())
 	}
+	val.Close()
 }
 
 func TestStrlen(t *testing.T) {
 	db := New()
-	db.Set("key", []byte("hello"))
+	db.Set("key", Buf("hello"))
 	if db.Strlen("key") != 5 {
 		t.Fatalf("expected strlen 5, got %d", db.Strlen("key"))
 	}
@@ -196,27 +184,34 @@ func TestIncrBy(t *testing.T) {
 	}
 }
 
+// ============================================================================
+// Lists
+// ============================================================================
+
 func TestLPushLPop(t *testing.T) {
 	db := New()
-	n := db.LPush("mylist", []byte("a"), []byte("b"), []byte("c"))
+	n := db.LPush("mylist", Buf("a"), Buf("b"), Buf("c"))
 	if n != 3 {
 		t.Fatalf("expected len 3, got %d", n)
 	}
 
 	val, ok := db.LPop("mylist")
-	if !ok || string(val) != "c" {
-		t.Fatalf("expected 'c', got '%s'", string(val))
+	if !ok || val.String() != "c" {
+		t.Fatalf("expected 'c', got '%s'", val.String())
 	}
+	val.Close()
 
 	val, ok = db.LPop("mylist")
-	if !ok || string(val) != "b" {
-		t.Fatalf("expected 'b', got '%s'", string(val))
+	if !ok || val.String() != "b" {
+		t.Fatalf("expected 'b', got '%s'", val.String())
 	}
+	val.Close()
 
 	val, ok = db.LPop("mylist")
-	if !ok || string(val) != "a" {
-		t.Fatalf("expected 'a', got '%s'", string(val))
+	if !ok || val.String() != "a" {
+		t.Fatalf("expected 'a', got '%s'", val.String())
 	}
+	val.Close()
 
 	_, ok = db.LPop("mylist")
 	if ok {
@@ -226,20 +221,21 @@ func TestLPushLPop(t *testing.T) {
 
 func TestRPushRPop(t *testing.T) {
 	db := New()
-	db.RPush("mylist", []byte("a"), []byte("b"), []byte("c"))
+	db.RPush("mylist", Buf("a"), Buf("b"), Buf("c"))
 
 	val, ok := db.RPop("mylist")
-	if !ok || string(val) != "c" {
-		t.Fatalf("expected 'c', got '%s'", string(val))
+	if !ok || val.String() != "c" {
+		t.Fatalf("expected 'c', got '%s'", val.String())
 	}
+	val.Close()
 }
 
 func TestLRange(t *testing.T) {
 	db := New()
-	db.RPush("mylist", []byte("a"), []byte("b"), []byte("c"), []byte("d"))
+	db.RPush("mylist", Buf("a"), Buf("b"), Buf("c"), Buf("d"))
 
 	result := db.LRange("mylist", 1, 2)
-	if len(result) != 2 || string(result[0]) != "b" || string(result[1]) != "c" {
+	if len(result) != 2 || result[0].String() != "b" || result[1].String() != "c" {
 		t.Fatalf("expected [b c], got %v", result)
 	}
 }
@@ -249,21 +245,26 @@ func TestLLen(t *testing.T) {
 	if db.LLen("mylist") != 0 {
 		t.Fatal("expected 0")
 	}
-	db.RPush("mylist", []byte("a"), []byte("b"))
+	db.RPush("mylist", Buf("a"), Buf("b"))
 	if db.LLen("mylist") != 2 {
 		t.Fatalf("expected 2, got %d", db.LLen("mylist"))
 	}
 }
 
+// ============================================================================
+// Hashes
+// ============================================================================
+
 func TestHSetHGet(t *testing.T) {
 	db := New()
-	db.HSet("myhash", "f1", []byte("v1"))
-	db.HSet("myhash", "f2", []byte("v2"))
+	db.HSet("myhash", "f1", Buf("v1"))
+	db.HSet("myhash", "f2", Buf("v2"))
 
 	v, ok := db.HGet("myhash", "f1")
-	if !ok || string(v) != "v1" {
-		t.Fatalf("expected 'v1', got '%s'", string(v))
+	if !ok || v.String() != "v1" {
+		t.Fatalf("expected 'v1', got '%s'", v.String())
 	}
+	v.Close()
 
 	_, ok = db.HGet("myhash", "nonexistent")
 	if ok {
@@ -273,8 +274,8 @@ func TestHSetHGet(t *testing.T) {
 
 func TestHDel(t *testing.T) {
 	db := New()
-	db.HSet("myhash", "f1", []byte("v1"))
-	db.HSet("myhash", "f2", []byte("v2"))
+	db.HSet("myhash", "f1", Buf("v1"))
+	db.HSet("myhash", "f2", Buf("v2"))
 
 	deleted := db.HDel("myhash", "f1")
 	if deleted != 1 {
@@ -294,14 +295,14 @@ func TestHDel(t *testing.T) {
 
 func TestHGetAll(t *testing.T) {
 	db := New()
-	db.HSet("myhash", "a", []byte("1"))
-	db.HSet("myhash", "b", []byte("2"))
+	db.HSet("myhash", "a", Buf("1"))
+	db.HSet("myhash", "b", Buf("2"))
 
 	all := db.HGetAll("myhash")
 	if len(all) != 2 {
 		t.Fatalf("expected 2 fields, got %d", len(all))
 	}
-	if string(all["a"]) != "1" || string(all["b"]) != "2" {
+	if all["a"].String() != "1" || all["b"].String() != "2" {
 		t.Fatalf("unexpected values: %v", all)
 	}
 }
@@ -319,41 +320,45 @@ func TestHIncrBy(t *testing.T) {
 	}
 }
 
+// ============================================================================
+// Sets
+// ============================================================================
+
 func TestSAddSIsMember(t *testing.T) {
 	db := New()
-	n := db.SAdd("myset", []byte("a"), []byte("b"), []byte("a"))
+	n := db.SAdd("myset", Buf("a"), Buf("b"), Buf("a"))
 	if n != 2 {
 		t.Fatalf("expected 2 added, got %d", n)
 	}
 
-	if !db.SIsMember("myset", []byte("a")) {
+	if !db.SIsMember("myset", Buf("a")) {
 		t.Fatal("expected 'a' to be member")
 	}
-	if !db.SIsMember("myset", []byte("b")) {
+	if !db.SIsMember("myset", Buf("b")) {
 		t.Fatal("expected 'b' to be member")
 	}
-	if db.SIsMember("myset", []byte("c")) {
+	if db.SIsMember("myset", Buf("c")) {
 		t.Fatal("expected 'c' not to be member")
 	}
 }
 
 func TestSRem(t *testing.T) {
 	db := New()
-	db.SAdd("myset", []byte("a"), []byte("b"), []byte("c"))
+	db.SAdd("myset", Buf("a"), Buf("b"), Buf("c"))
 
-	removed := db.SRem("myset", []byte("a"), []byte("d"))
+	removed := db.SRem("myset", Buf("a"), Buf("d"))
 	if removed != 1 {
 		t.Fatalf("expected 1 removed, got %d", removed)
 	}
 
-	if db.SIsMember("myset", []byte("a")) {
+	if db.SIsMember("myset", Buf("a")) {
 		t.Fatal("'a' should have been removed")
 	}
 }
 
 func TestSCard(t *testing.T) {
 	db := New()
-	db.SAdd("myset", []byte("a"), []byte("b"), []byte("c"))
+	db.SAdd("myset", Buf("a"), Buf("b"), Buf("c"))
 	if db.SCard("myset") != 3 {
 		t.Fatalf("expected 3, got %d", db.SCard("myset"))
 	}
@@ -361,7 +366,7 @@ func TestSCard(t *testing.T) {
 
 func TestSMembers(t *testing.T) {
 	db := New()
-	db.SAdd("myset", []byte("a"), []byte("b"))
+	db.SAdd("myset", Buf("a"), Buf("b"))
 
 	members := db.SMembers("myset")
 	if len(members) != 2 {
@@ -369,18 +374,22 @@ func TestSMembers(t *testing.T) {
 	}
 }
 
+// ============================================================================
+// Sorted Sets
+// ============================================================================
+
 func TestZAddZScore(t *testing.T) {
 	db := New()
-	db.ZAdd("myzset", 1.0, []byte("a"))
-	db.ZAdd("myzset", 2.0, []byte("b"))
-	db.ZAdd("myzset", 3.0, []byte("c"))
+	db.ZAdd("myzset", 1.0, Buf("a"))
+	db.ZAdd("myzset", 2.0, Buf("b"))
+	db.ZAdd("myzset", 3.0, Buf("c"))
 
-	score, ok := db.ZScore("myzset", []byte("b"))
+	score, ok := db.ZScore("myzset", Buf("b"))
 	if !ok || score != 2.0 {
 		t.Fatalf("expected score 2.0, got %f", score)
 	}
 
-	_, ok = db.ZScore("myzset", []byte("nonexistent"))
+	_, ok = db.ZScore("myzset", Buf("nonexistent"))
 	if ok {
 		t.Fatal("expected not found")
 	}
@@ -388,9 +397,9 @@ func TestZAddZScore(t *testing.T) {
 
 func TestZRange(t *testing.T) {
 	db := New()
-	db.ZAdd("myzset", 3.0, []byte("c"))
-	db.ZAdd("myzset", 1.0, []byte("a"))
-	db.ZAdd("myzset", 2.0, []byte("b"))
+	db.ZAdd("myzset", 3.0, Buf("c"))
+	db.ZAdd("myzset", 1.0, Buf("a"))
+	db.ZAdd("myzset", 2.0, Buf("b"))
 
 	result := db.ZRange("myzset", 0, -1)
 	if result.Len() != 3 {
@@ -403,8 +412,8 @@ func TestZRange(t *testing.T) {
 
 func TestZRangeWithScores(t *testing.T) {
 	db := New()
-	db.ZAdd("myzset", 1.5, []byte("x"))
-	db.ZAdd("myzset", 2.5, []byte("y"))
+	db.ZAdd("myzset", 1.5, Buf("x"))
+	db.ZAdd("myzset", 2.5, Buf("y"))
 
 	members, scores := db.ZRangeWithScores("myzset", 0, -1)
 	if len(members) != 2 || members[0] != "x" || scores[0] != 1.5 {
@@ -414,13 +423,13 @@ func TestZRangeWithScores(t *testing.T) {
 
 func TestZRem(t *testing.T) {
 	db := New()
-	db.ZAdd("myzset", 1.0, []byte("a"))
-	db.ZAdd("myzset", 2.0, []byte("b"))
+	db.ZAdd("myzset", 1.0, Buf("a"))
+	db.ZAdd("myzset", 2.0, Buf("b"))
 
-	if !db.ZRem("myzset", []byte("a")) {
+	if !db.ZRem("myzset", Buf("a")) {
 		t.Fatal("expected remove to succeed")
 	}
-	_, ok := db.ZScore("myzset", []byte("a"))
+	_, ok := db.ZScore("myzset", Buf("a"))
 	if ok {
 		t.Fatal("'a' should be removed")
 	}
@@ -428,12 +437,16 @@ func TestZRem(t *testing.T) {
 
 func TestZCard(t *testing.T) {
 	db := New()
-	db.ZAdd("myzset", 1.0, []byte("a"))
-	db.ZAdd("myzset", 2.0, []byte("b"))
+	db.ZAdd("myzset", 1.0, Buf("a"))
+	db.ZAdd("myzset", 2.0, Buf("b"))
 	if db.ZCard("myzset") != 2 {
 		t.Fatalf("expected 2, got %d", db.ZCard("myzset"))
 	}
 }
+
+// ============================================================================
+// Bitmap
+// ============================================================================
 
 func TestBitMapSetGetBit(t *testing.T) {
 	db := New()
@@ -483,14 +496,18 @@ func TestBitOp(t *testing.T) {
 	}
 }
 
+// ============================================================================
+// HyperLogLog, Geo, Stream, Timeseries, Probabilistic, JSON
+// ============================================================================
+
 func TestHyperLogLog(t *testing.T) {
 	db := New()
-	updated := db.PFAdd("hll", []byte("a"), []byte("b"), []byte("c"))
+	updated := db.PFAdd("hll", Buf("a"), Buf("b"), Buf("c"))
 	if updated != 3 {
 		t.Fatalf("expected 3 updated, got %d", updated)
 	}
 
-	updated = db.PFAdd("hll", []byte("a"), []byte("b"))
+	updated = db.PFAdd("hll", Buf("a"), Buf("b"))
 	if updated != 0 {
 		t.Fatalf("expected 0 updated, got %d", updated)
 	}
@@ -514,16 +531,16 @@ func TestGeoAddDist(t *testing.T) {
 
 func TestStream(t *testing.T) {
 	db := New()
-	id := db.XAdd("mystream", "*", map[string][]byte{
-		"name": []byte("Alice"),
-		"age":  []byte("30"),
+	id := db.XAdd("mystream", "*", map[string]*PooledBuffer{
+		"name": Buf("Alice"),
+		"age":  Buf("30"),
 	})
 	if id == "" {
 		t.Fatal("expected non-empty stream id")
 	}
 
-	id2 := db.XAdd("mystream", "*", map[string][]byte{
-		"name": []byte("Bob"),
+	id2 := db.XAdd("mystream", "*", map[string]*PooledBuffer{
+		"name": Buf("Bob"),
 	})
 	if id2 == "" {
 		t.Fatal("expected non-empty stream id")
@@ -560,16 +577,16 @@ func TestTimeSeries(t *testing.T) {
 func TestBloomFilter(t *testing.T) {
 	db := New()
 	db.BFReserve("bf", 0.01, 1000)
-	db.BFAdd("bf", []byte("item1"))
-	db.BFAdd("bf", []byte("item2"))
+	db.BFAdd("bf", Buf("item1"))
+	db.BFAdd("bf", Buf("item2"))
 
-	if !db.BFExists("bf", []byte("item1")) {
+	if !db.BFExists("bf", Buf("item1")) {
 		t.Fatal("expected item1 to exist")
 	}
-	if !db.BFExists("bf", []byte("item2")) {
+	if !db.BFExists("bf", Buf("item2")) {
 		t.Fatal("expected item2 to exist")
 	}
-	if db.BFExists("bf", []byte("item3")) {
+	if db.BFExists("bf", Buf("item3")) {
 		t.Fatal("expected item3 not to exist (may be false positive)")
 	}
 }
@@ -577,15 +594,15 @@ func TestBloomFilter(t *testing.T) {
 func TestCuckooFilter(t *testing.T) {
 	db := New()
 	db.CFReserve("cf", 1024)
-	db.CFAdd("cf", []byte("x"))
-	db.CFAdd("cf", []byte("y"))
+	db.CFAdd("cf", Buf("x"))
+	db.CFAdd("cf", Buf("y"))
 
-	if !db.CFExists("cf", []byte("x")) {
+	if !db.CFExists("cf", Buf("x")) {
 		t.Fatal("expected x to exist")
 	}
 
-	db.CFDel("cf", []byte("x"))
-	if db.CFExists("cf", []byte("x")) {
+	db.CFDel("cf", Buf("x"))
+	if db.CFExists("cf", Buf("x")) {
 		t.Fatal("expected x to be deleted")
 	}
 }
@@ -594,11 +611,11 @@ func TestCountMinSketch(t *testing.T) {
 	db := New()
 	db.CMSInitByDim("cms", 100, 5)
 
-	db.CMSIncrBy("cms", []byte("a"), 5)
-	db.CMSIncrBy("cms", []byte("b"), 3)
-	db.CMSIncrBy("cms", []byte("a"), 2)
+	db.CMSIncrBy("cms", Buf("a"), 5)
+	db.CMSIncrBy("cms", Buf("b"), 3)
+	db.CMSIncrBy("cms", Buf("a"), 2)
 
-	counts := db.CMSQuery("cms", []byte("a"), []byte("b"), []byte("c"))
+	counts := db.CMSQuery("cms", Buf("a"), Buf("b"), Buf("c"))
 	if counts[0] < 7 {
 		t.Fatalf("expected a >= 7, got %d", counts[0])
 	}
@@ -657,7 +674,7 @@ func TestThrottle(t *testing.T) {
 
 func TestFlushAll(t *testing.T) {
 	db := New()
-	db.Set("key", []byte("value"))
+	db.Set("key", Buf("value"))
 	db.FlushAll()
 
 	if db.Exists("key") {
@@ -674,7 +691,9 @@ func TestConcurrency(t *testing.T) {
 		go func(n int) {
 			defer wg.Done()
 			key := fmt.Sprintf("key%d", n)
-			db.Set(key, []byte(fmt.Sprintf("val%d", n)))
+			pb := Buf(fmt.Sprintf("val%d", n))
+			db.Set(key, pb)
+			pb.Close()
 		}(i)
 	}
 
@@ -692,7 +711,9 @@ func TestNoPointerLeak(t *testing.T) {
 	db := New()
 	for i := 0; i < 1000; i++ {
 		key := fmt.Sprintf("key%d", i)
-		db.Set(key, []byte(fmt.Sprintf("value%d", i)))
+		pb := Buf(fmt.Sprintf("value%d", i))
+		db.Set(key, pb)
+		pb.Close()
 	}
 
 	for i := 0; i < 1000; i++ {

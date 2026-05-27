@@ -20,12 +20,14 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+// 位图（Bitmap）实现，支持位级别的读写、统计和位运算。
 package gedis
 
 import (
 	"encoding/binary"
 )
 
+// SetBit 设置或清除指定偏移位置的位。返回该位的旧值。
 func (db *RedisDB) SetBit(key string, offset int, val int) int {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -83,6 +85,7 @@ func (db *RedisDB) SetBit(key string, offset int, val int) int {
 	return int(oldBit)
 }
 
+// GetBit 获取指定偏移位置的位值（0 或 1）。
 func (db *RedisDB) GetBit(key string, offset int) int {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -106,6 +109,7 @@ func (db *RedisDB) GetBit(key string, offset int) int {
 	return int((data[byteIdx] >> bitIdx) & 1)
 }
 
+// BitCount 统计指定范围内设置为 1 的位数。
 func (db *RedisDB) BitCount(key string, start, end int) int {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -144,6 +148,7 @@ func (db *RedisDB) BitCount(key string, start, end int) int {
 	return count
 }
 
+// BitOp 对多个位图执行位运算（AND、OR、XOR、NOT），结果存入目标键。
 func (db *RedisDB) BitOp(op string, destKey string, srcKeys ...string) int {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -223,7 +228,8 @@ func (db *RedisDB) BitOp(op string, destKey string, srcKeys ...string) int {
 	return len(result)
 }
 
-func (db *RedisDB) BitField(key string, args ...[]byte) []int64 {
+// BitField 在位图上执行 GET、SET、INCRBY 子命令。
+func (db *RedisDB) BitField(key string, args ...*PooledBuffer) []int64 {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -245,9 +251,9 @@ func (db *RedisDB) BitField(key string, args ...[]byte) []int64 {
 			break
 		}
 
-		op := string(args[i])
-		typeStr := string(args[i+1])
-		offsetOrOverflow, _ := parseIntBytes(args[i+2])
+		op := args[i].String()
+		typeStr := args[i+1].String()
+		offsetOrOverflow, _ := parseIntBytes(args[i+2].Bytes())
 
 		isSigned := typeStr[0] == 'i'
 		var bits int64
@@ -264,7 +270,7 @@ func (db *RedisDB) BitField(key string, args ...[]byte) []int64 {
 			if i+3 >= len(args) {
 				break
 			}
-			setVal, _ := parseIntBytes(args[i+3])
+			setVal, _ := parseIntBytes(args[i+3].Bytes())
 			oldVal := bitfieldGet(data, int(offsetOrOverflow), int(bits), isSigned)
 			data = bitfieldSet(data, int(offsetOrOverflow), int(bits), setVal)
 			results = append(results, oldVal)
@@ -273,7 +279,7 @@ func (db *RedisDB) BitField(key string, args ...[]byte) []int64 {
 			if i+3 >= len(args) {
 				break
 			}
-			incVal, _ := parseIntBytes(args[i+3])
+			incVal, _ := parseIntBytes(args[i+3].Bytes())
 			curVal := bitfieldGet(data, int(offsetOrOverflow), int(bits), isSigned)
 			newVal := curVal + incVal
 			data = bitfieldSet(data, int(offsetOrOverflow), int(bits), newVal)

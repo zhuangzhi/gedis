@@ -23,21 +23,20 @@
 package gedis
 
 import (
-	"encoding/binary"
 	"strconv"
 )
 
-func (db *RedisDB) Set(key string, value []byte) {
+func (db *RedisDB) Set(key string, value *PooledBuffer) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
 	keyBytes := []byte(key)
-	valOff := db.arena.AllocBytes(value)
+	valOff := db.arena.AllocBytes(value.Bytes())
 	headOff := db.NewObject(ObjString, ObjEncodingRaw, valOff)
 	db.dict.Set(keyBytes, headOff)
 }
 
-func (db *RedisDB) Get(key string) ([]byte, bool) {
+func (db *RedisDB) Get(key string) (*PooledBuffer, bool) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -56,9 +55,10 @@ func (db *RedisDB) Get(key string) ([]byte, bool) {
 
 	if enc == ObjEncodingInt {
 		val := int64(db.arena.ReadUint64(objHeaderDataOffset(headOff)))
-		buf := make([]byte, 8)
-		binary.LittleEndian.PutUint64(buf, uint64(val))
-		return []byte(strconv.FormatInt(val, 10)), true
+		s := strconv.FormatInt(val, 10)
+		pb := NewBuf(len(s))
+		pb.WriteString(s)
+		return pb, true
 	}
 
 	if dataOff == 0 {
@@ -66,21 +66,24 @@ func (db *RedisDB) Get(key string) ([]byte, bool) {
 	}
 
 	size := db.arena.SizeAt(dataOff)
-	return db.arena.ReadBytes(dataOff, size), true
+	pb := NewBuf(size)
+	pb.buf.Write(db.arena.GetSlice(dataOff, size))
+	return pb, true
 }
 
-func (db *RedisDB) Append(key string, value []byte) int {
+func (db *RedisDB) Append(key string, value *PooledBuffer) int {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
 	keyBytes := []byte(key)
 	headOff, ok := db.dict.Get(keyBytes)
+	valBytes := value.Bytes()
 
 	if !ok {
-		valOff := db.arena.AllocBytes(value)
+		valOff := db.arena.AllocBytes(valBytes)
 		headOff = db.NewObject(ObjString, ObjEncodingRaw, valOff)
 		db.dict.Set(keyBytes, headOff)
-		return len(value)
+		return len(valBytes)
 	}
 
 	enc := db.ObjectEncoding(headOff)
@@ -89,7 +92,7 @@ func (db *RedisDB) Append(key string, value []byte) int {
 	if enc == ObjEncodingInt {
 		oldVal := int64(db.arena.ReadUint64(objHeaderDataOffset(headOff)))
 		oldStr := strconv.FormatInt(oldVal, 10)
-		newData := append([]byte(oldStr), value...)
+		newData := append([]byte(oldStr), valBytes...)
 		db.arena.Free(dataOff)
 		newOff := db.arena.AllocBytes(newData)
 		db.ObjectSetDataOffset(headOff, newOff)
@@ -98,14 +101,14 @@ func (db *RedisDB) Append(key string, value []byte) int {
 	}
 
 	if dataOff == 0 {
-		newOff := db.arena.AllocBytes(value)
+		newOff := db.arena.AllocBytes(valBytes)
 		db.ObjectSetDataOffset(headOff, newOff)
-		return len(value)
+		return len(valBytes)
 	}
 
 	oldSize := db.arena.SizeAt(dataOff)
 	oldData := db.arena.ReadBytes(dataOff, oldSize)
-	newData := append(oldData, value...)
+	newData := append(oldData, valBytes...)
 
 	db.arena.Free(dataOff)
 	newOff := db.arena.AllocBytes(newData)
@@ -114,16 +117,17 @@ func (db *RedisDB) Append(key string, value []byte) int {
 	return len(newData)
 }
 
-func (db *RedisDB) GetRange(key string, start, end int) []byte {
+func (db *RedisDB) GetRange(key string, start, end int) (*PooledBuffer, bool) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
-	data, ok := db.Get(key)
+	pb, ok := db.Get(key)
 	if !ok {
-		return nil
+		return nil, false
 	}
+	defer pb.Close()
 
-	size := len(data)
+	size := pb.Len()
 	if start < 0 {
 		start = size + start
 	}
@@ -137,24 +141,27 @@ func (db *RedisDB) GetRange(key string, start, end int) []byte {
 		end = size - 1
 	}
 	if start > end {
-		return nil
+		return nil, false
 	}
 
-	return data[start : end+1]
+	out := NewBuf(end - start + 1)
+	out.buf.Write(pb.Bytes()[start : end+1])
+	return out, true
 }
 
-func (db *RedisDB) SetRange(key string, offset int, value []byte) int {
+func (db *RedisDB) SetRange(key string, offset int, value *PooledBuffer) int {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
 	keyBytes := []byte(key)
 	headOff, ok := db.dict.Get(keyBytes)
+	valBytes := value.Bytes()
 
 	if !ok {
-		valOff := db.arena.AllocBytes(value)
+		valOff := db.arena.AllocBytes(valBytes)
 		headOff = db.NewObject(ObjString, ObjEncodingRaw, valOff)
 		db.dict.Set(keyBytes, headOff)
-		return len(value)
+		return len(valBytes)
 	}
 
 	enc := db.ObjectEncoding(headOff)
@@ -169,14 +176,14 @@ func (db *RedisDB) SetRange(key string, offset int, value []byte) int {
 		oldData = db.arena.ReadBytes(dataOff, oldSize)
 	}
 
-	newLen := offset + len(value)
+	newLen := offset + len(valBytes)
 	if newLen < len(oldData) {
 		newLen = len(oldData)
 	}
 
 	newData := make([]byte, newLen)
 	copy(newData, oldData)
-	copy(newData[offset:], value)
+	copy(newData[offset:], valBytes)
 
 	if dataOff != 0 {
 		db.arena.Free(dataOff)
@@ -241,8 +248,7 @@ func (db *RedisDB) IncrBy(key string, inc int64) (int64, error) {
 	}
 
 	size := db.arena.SizeAt(dataOff)
-	strVal := string(db.arena.ReadBytes(dataOff, size))
-	oldVal, err := strconv.ParseInt(strVal, 10, 64)
+	oldVal, err := strconv.ParseInt(string(db.arena.ReadBytes(dataOff, size)), 10, 64)
 	if err != nil {
 		return 0, err
 	}
@@ -263,11 +269,12 @@ func (db *RedisDB) IncrByFloat(key string, inc float64) (float64, error) {
 	headOff, ok := db.dict.Get(keyBytes)
 
 	if !ok {
-		newStr := strconv.FormatFloat(inc, 'f', -1, 64)
-		valOff := db.arena.AllocBytes([]byte(newStr))
-		headOff = db.NewObject(ObjString, ObjEncodingRaw, valOff)
+		newVal := inc
+		newStr := strconv.FormatFloat(newVal, 'f', -1, 64)
+		newOff := db.arena.AllocBytes([]byte(newStr))
+		headOff = db.NewObject(ObjString, ObjEncodingRaw, newOff)
 		db.dict.Set(keyBytes, headOff)
-		return inc, nil
+		return newVal, nil
 	}
 
 	enc := db.ObjectEncoding(headOff)
@@ -298,4 +305,3 @@ func (db *RedisDB) IncrByFloat(key string, inc float64) (float64, error) {
 
 	return newVal, nil
 }
-

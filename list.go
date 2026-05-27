@@ -27,7 +27,13 @@ const (
 	listMaxZiplistValue   = 64
 )
 
-func (db *RedisDB) LPush(key string, values ...[]byte) int {
+func listValToBuf(val []byte) *PooledBuffer {
+	pb := NewBuf(len(val))
+	pb.buf.Write(val)
+	return pb
+}
+
+func (db *RedisDB) LPush(key string, values ...*PooledBuffer) int {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -37,7 +43,7 @@ func (db *RedisDB) LPush(key string, values ...[]byte) int {
 	if !ok {
 		zlOff := ziplistNew(db.arena)
 		for _, v := range values {
-			zlOff = ziplistInsert(db.arena, zlOff, v, true)
+			zlOff = ziplistInsert(db.arena, zlOff, v.Bytes(), true)
 		}
 		headOff = db.NewObject(ObjList, ObjEncodingZiplist, zlOff)
 		db.dict.Set(keyBytes, headOff)
@@ -50,7 +56,7 @@ func (db *RedisDB) LPush(key string, values ...[]byte) int {
 	if enc == ObjEncodingZiplist {
 		zlOff := dataOff
 		for _, v := range values {
-			zlOff = ziplistInsert(db.arena, zlOff, v, true)
+			zlOff = ziplistInsert(db.arena, zlOff, v.Bytes(), true)
 		}
 		db.ObjectSetDataOffset(headOff, zlOff)
 		return ziplistLen(db.arena, zlOff)
@@ -59,7 +65,7 @@ func (db *RedisDB) LPush(key string, values ...[]byte) int {
 	return 0
 }
 
-func (db *RedisDB) RPush(key string, values ...[]byte) int {
+func (db *RedisDB) RPush(key string, values ...*PooledBuffer) int {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -69,7 +75,7 @@ func (db *RedisDB) RPush(key string, values ...[]byte) int {
 	if !ok {
 		zlOff := ziplistNew(db.arena)
 		for _, v := range values {
-			zlOff = ziplistInsert(db.arena, zlOff, v, false)
+			zlOff = ziplistInsert(db.arena, zlOff, v.Bytes(), false)
 		}
 		headOff = db.NewObject(ObjList, ObjEncodingZiplist, zlOff)
 		db.dict.Set(keyBytes, headOff)
@@ -82,7 +88,7 @@ func (db *RedisDB) RPush(key string, values ...[]byte) int {
 	if enc == ObjEncodingZiplist {
 		zlOff := dataOff
 		for _, v := range values {
-			zlOff = ziplistInsert(db.arena, zlOff, v, false)
+			zlOff = ziplistInsert(db.arena, zlOff, v.Bytes(), false)
 		}
 		db.ObjectSetDataOffset(headOff, zlOff)
 		return ziplistLen(db.arena, zlOff)
@@ -91,7 +97,7 @@ func (db *RedisDB) RPush(key string, values ...[]byte) int {
 	return 0
 }
 
-func (db *RedisDB) LPop(key string) ([]byte, bool) {
+func (db *RedisDB) LPop(key string) (*PooledBuffer, bool) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -111,19 +117,20 @@ func (db *RedisDB) LPop(key string) ([]byte, bool) {
 			return nil, false
 		}
 		val := ziplistGet(db.arena, zlOff, 0)
+		pb := listValToBuf(val)
 		zlOff = ziplistDelete(db.arena, zlOff, 0)
 		db.ObjectSetDataOffset(headOff, zlOff)
 		if ziplistLen(db.arena, zlOff) == 0 {
 			db.dict.Del(keyBytes)
 			db.FreeObject(headOff)
 		}
-		return val, true
+		return pb, true
 	}
 
 	return nil, false
 }
 
-func (db *RedisDB) RPop(key string) ([]byte, bool) {
+func (db *RedisDB) RPop(key string) (*PooledBuffer, bool) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -143,19 +150,20 @@ func (db *RedisDB) RPop(key string) ([]byte, bool) {
 			return nil, false
 		}
 		val := ziplistGet(db.arena, zlOff, n-1)
+		pb := listValToBuf(val)
 		zlOff = ziplistDelete(db.arena, zlOff, n-1)
 		db.ObjectSetDataOffset(headOff, zlOff)
 		if ziplistLen(db.arena, zlOff) == 0 {
 			db.dict.Del(keyBytes)
 			db.FreeObject(headOff)
 		}
-		return val, true
+		return pb, true
 	}
 
 	return nil, false
 }
 
-func (db *RedisDB) LIndex(key string, index int) ([]byte, bool) {
+func (db *RedisDB) LIndex(key string, index int) (*PooledBuffer, bool) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -178,13 +186,13 @@ func (db *RedisDB) LIndex(key string, index int) ([]byte, bool) {
 			return nil, false
 		}
 		val := ziplistGet(db.arena, zlOff, index)
-		return val, true
+		return listValToBuf(val), true
 	}
 
 	return nil, false
 }
 
-func (db *RedisDB) LRange(key string, start, stop int) [][]byte {
+func (db *RedisDB) LRange(key string, start, stop int) []*PooledBuffer {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -216,10 +224,10 @@ func (db *RedisDB) LRange(key string, start, stop int) [][]byte {
 			return nil
 		}
 
-		result := make([][]byte, 0, stop-start+1)
+		result := make([]*PooledBuffer, 0, stop-start+1)
 		for i := start; i <= stop; i++ {
 			val := ziplistGet(db.arena, zlOff, i)
-			result = append(result, val)
+			result = append(result, listValToBuf(val))
 		}
 		return result
 	}

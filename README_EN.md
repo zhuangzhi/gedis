@@ -70,6 +70,8 @@ Each stored value is prefixed with a 16-byte object header:
 
 ## API Reference
 
+> See [API.md](./API.md) for detailed API documentation.
+
 ### Keys
 
 ```go
@@ -82,11 +84,13 @@ func (db *RedisDB) FlushAll()
 ### Strings
 
 ```go
-func (db *RedisDB) Set(key string, value []byte)
-func (db *RedisDB) Get(key string) ([]byte, bool)
-func (db *RedisDB) Append(key string, value []byte) int
-func (db *RedisDB) GetRange(key string, start, end int) []byte
-func (db *RedisDB) SetRange(key string, offset int, value []byte) int
+func Buf(s string) *PooledBuffer
+func NewBuf(minCap int) *PooledBuffer
+func (db *RedisDB) Set(key string, value *PooledBuffer)
+func (db *RedisDB) Get(key string) (*PooledBuffer, bool)
+func (db *RedisDB) Append(key string, value *PooledBuffer) int
+func (db *RedisDB) GetRange(key string, start, end int) (*PooledBuffer, bool)
+func (db *RedisDB) SetRange(key string, offset int, value *PooledBuffer) int
 func (db *RedisDB) Strlen(key string) int
 func (db *RedisDB) IncrBy(key string, inc int64) (int64, error)
 func (db *RedisDB) IncrByFloat(key string, inc float64) (float64, error)
@@ -95,22 +99,22 @@ func (db *RedisDB) IncrByFloat(key string, inc float64) (float64, error)
 ### Lists
 
 ```go
-func (db *RedisDB) LPush(key string, values ...[]byte) int
-func (db *RedisDB) RPush(key string, values ...[]byte) int
-func (db *RedisDB) LPop(key string) ([]byte, bool)
-func (db *RedisDB) RPop(key string) ([]byte, bool)
-func (db *RedisDB) LIndex(key string, index int) ([]byte, bool)
-func (db *RedisDB) LRange(key string, start, stop int) [][]byte
+func (db *RedisDB) LPush(key string, values ...*PooledBuffer) int
+func (db *RedisDB) RPush(key string, values ...*PooledBuffer) int
+func (db *RedisDB) LPop(key string) (*PooledBuffer, bool)
+func (db *RedisDB) RPop(key string) (*PooledBuffer, bool)
+func (db *RedisDB) LIndex(key string, index int) (*PooledBuffer, bool)
+func (db *RedisDB) LRange(key string, start, stop int) []*PooledBuffer
 func (db *RedisDB) LLen(key string) int
 ```
 
 ### Hashes
 
 ```go
-func (db *RedisDB) HSet(key, field string, value []byte) int
-func (db *RedisDB) HGet(key, field string) ([]byte, bool)
+func (db *RedisDB) HSet(key, field string, value *PooledBuffer) int
+func (db *RedisDB) HGet(key, field string) (*PooledBuffer, bool)
 func (db *RedisDB) HDel(key string, fields ...string) int
-func (db *RedisDB) HGetAll(key string) map[string][]byte
+func (db *RedisDB) HGetAll(key string) map[string]*PooledBuffer
 func (db *RedisDB) HIncrBy(key, field string, inc int64) (int64, error)
 func (db *RedisDB) HExists(key, field string) bool
 func (db *RedisDB) HLen(key string) int
@@ -119,25 +123,25 @@ func (db *RedisDB) HLen(key string) int
 ### Sets
 
 ```go
-func (db *RedisDB) SAdd(key string, members ...[]byte) int
-func (db *RedisDB) SRem(key string, members ...[]byte) int
-func (db *RedisDB) SIsMember(key string, member []byte) bool
-func (db *RedisDB) SMembers(key string) [][]byte
+func (db *RedisDB) SAdd(key string, members ...*PooledBuffer) int
+func (db *RedisDB) SRem(key string, members ...*PooledBuffer) int
+func (db *RedisDB) SIsMember(key string, member *PooledBuffer) bool
+func (db *RedisDB) SMembers(key string) []*PooledBuffer
 func (db *RedisDB) SCard(key string) int
-func (db *RedisDB) SInter(keys ...string) [][]byte
-func (db *RedisDB) SUnion(keys ...string) [][]byte
+func (db *RedisDB) SInter(keys ...string) []*PooledBuffer
+func (db *RedisDB) SUnion(keys ...string) []*PooledBuffer
 ```
 
 ### Sorted Sets
 
 ```go
-func (db *RedisDB) ZAdd(key string, score float64, member []byte) int
-func (db *RedisDB) ZRem(key string, member []byte) bool
-func (db *RedisDB) ZScore(key string, member []byte) (float64, bool)
+func (db *RedisDB) ZAdd(key string, score float64, member *PooledBuffer) int
+func (db *RedisDB) ZRem(key string, member *PooledBuffer) bool
+func (db *RedisDB) ZScore(key string, member *PooledBuffer) (float64, bool)
 func (db *RedisDB) ZRange(key string, start, stop int) ZSlices
 func (db *RedisDB) ZRangeIter(key string, start, stop int, fn func(member []byte))
 func (db *RedisDB) ZRangeWithScores(key string, start, stop int) ([]string, []float64)
-func (db *RedisDB) ZRangeByScore(key string, min, max float64) [][]byte
+func (db *RedisDB) ZRangeByScore(key string, min, max float64) []*PooledBuffer
 func (db *RedisDB) ZRemRangeByScore(key string, min, max float64) int
 func (db *RedisDB) ZCard(key string) int
 ```
@@ -149,13 +153,13 @@ func (db *RedisDB) SetBit(key string, offset int, val int) int
 func (db *RedisDB) GetBit(key string, offset int) int
 func (db *RedisDB) BitCount(key string, start, end int) int
 func (db *RedisDB) BitOp(op string, destKey string, srcKeys ...string) int
-func (db *RedisDB) BitField(key string, args ...[]byte) []int64
+func (db *RedisDB) BitField(key string, args ...*PooledBuffer) []int64
 ```
 
 ### HyperLogLog
 
 ```go
-func (db *RedisDB) PFAdd(key string, elements ...[]byte) int
+func (db *RedisDB) PFAdd(key string, elements ...*PooledBuffer) int
 func (db *RedisDB) PFCount(keys ...string) int64
 func (db *RedisDB) PFMerge(dest string, sources ...string)
 ```
@@ -173,7 +177,7 @@ func (db *RedisDB) GeoPos(key string, members ...string) [][2]float64
 ### Streams
 
 ```go
-func (db *RedisDB) XAdd(key string, id string, fields map[string][]byte) string
+func (db *RedisDB) XAdd(key string, id string, fields map[string]*PooledBuffer) string
 func (db *RedisDB) XRead(streams map[string]string, count int) map[string][]StreamEntry
 func (db *RedisDB) XReadGroup(group, consumer string, streams map[string]string, count int) map[string][]StreamEntry
 func (db *RedisDB) XGroupCreate(key, group, startID string) error
@@ -194,19 +198,19 @@ func (db *RedisDB) TSDel(key string, startTs, endTs int64) int
 ```go
 // Bloom Filter
 func (db *RedisDB) BFReserve(key string, errorRate float64, capacity int)
-func (db *RedisDB) BFAdd(key string, item []byte) bool
-func (db *RedisDB) BFExists(key string, item []byte) bool
+func (db *RedisDB) BFAdd(key string, item *PooledBuffer) bool
+func (db *RedisDB) BFExists(key string, item *PooledBuffer) bool
 
 // Cuckoo Filter
 func (db *RedisDB) CFReserve(key string, capacity int)
-func (db *RedisDB) CFAdd(key string, item []byte) bool
-func (db *RedisDB) CFDel(key string, item []byte) bool
-func (db *RedisDB) CFExists(key string, item []byte) bool
+func (db *RedisDB) CFAdd(key string, item *PooledBuffer) bool
+func (db *RedisDB) CFDel(key string, item *PooledBuffer) bool
+func (db *RedisDB) CFExists(key string, item *PooledBuffer) bool
 
 // Count-Min Sketch
 func (db *RedisDB) CMSInitByDim(key string, width, depth int)
-func (db *RedisDB) CMSIncrBy(key string, item []byte, inc int) int
-func (db *RedisDB) CMSQuery(key string, items ...[]byte) []int
+func (db *RedisDB) CMSIncrBy(key string, item *PooledBuffer, inc int) int
+func (db *RedisDB) CMSQuery(key string, items ...*PooledBuffer) []int
 
 // Top-K
 func (db *RedisDB) TopKReserve(key string, k int)
@@ -259,23 +263,26 @@ func main() {
     db := gedis.New()
 
     // Strings
-    db.Set("hello", []byte("world"))
+    db.Set("hello", gedis.Buf("world"))
     val, _ := db.Get("hello")
-    fmt.Println(string(val)) // world
+    fmt.Println(val.String()) // world
+    val.Close()
 
     // Lists
-    db.LPush("mylist", []byte("a"), []byte("b"), []byte("c"))
+    db.LPush("mylist", gedis.Buf("a"), gedis.Buf("b"), gedis.Buf("c"))
     v, _ := db.LPop("mylist")
-    fmt.Println(string(v)) // c
+    fmt.Println(v.String()) // c
+    v.Close()
 
     // Hashes
-    db.HSet("myhash", "f1", []byte("v1"))
+    db.HSet("myhash", "f1", gedis.Buf("v1"))
     v, _ = db.HGet("myhash", "f1")
-    fmt.Println(string(v)) // v1
+    fmt.Println(v.String()) // v1
+    v.Close()
 
     // Sorted Sets
-    db.ZAdd("myzset", 1.0, []byte("a"))
-    db.ZAdd("myzset", 2.0, []byte("b"))
+    db.ZAdd("myzset", 1.0, gedis.Buf("a"))
+    db.ZAdd("myzset", 2.0, gedis.Buf("b"))
     members := db.ZRange("myzset", 0, -1)
     for i := 0; i < members.Len(); i++ {
         fmt.Println(string(members.Get(i)))
@@ -284,8 +291,8 @@ func main() {
 
     // Probabilistic - Bloom Filter
     db.BFReserve("bf", 0.01, 1000000)
-    db.BFAdd("bf", []byte("item1"))
-    exists := db.BFExists("bf", []byte("item1"))
+    db.BFAdd("bf", gedis.Buf("item1"))
+    exists := db.BFExists("bf", gedis.Buf("item1"))
     fmt.Println(exists) // true
 }
 ```
@@ -400,7 +407,8 @@ gedis/
 ├── graph.go          # Graph commands
 ├── cell.go           # Rate Limiter commands
 ├── redis_test.go     # Unit tests (42 tests)
-└── redis_bench_test.go # Benchmarks (42 benchmarks)
+├── redis_bench_test.go # Benchmarks (42 benchmarks)
+├── API.md            # Detailed API documentation
 ```
 
 ## Testing

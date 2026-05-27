@@ -20,21 +20,26 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+// Dict 是基于 Arena 的开放寻址哈希表，使用 FNV-1a 哈希函数。
+// 键值对以整数偏移量形式存储在 Arena 中，避免 GC 压力。
+// 当负载因子超过 75% 时自动触发 rehash 扩容。
 package gedis
 
 const (
-	dictSlotSize   = 8
-	dictInitSize   = 16
-	dictLoadFactor = 75
+	dictSlotSize   = 8  // 每槽 8 字节（4 字节 key + 4 字节 value）
+	dictInitSize   = 16 // 初始哈希表大小
+	dictLoadFactor = 75 // 负载因子百分比阈值
 )
 
+// Dict 哈希表结构体
 type Dict struct {
-	arena *Arena
-	table int
-	size  int
-	used  int
+	arena *Arena // Arena 内存分配器引用
+	table int    // 哈希表在 Arena 中的偏移
+	size  int    // 哈希表槽位数
+	used  int    // 已使用槽位数
 }
 
+// NewDict 创建并初始化一个新的 Dict。
 func NewDict(arena *Arena) *Dict {
 	tableOff := arena.Alloc(dictInitSize * dictSlotSize)
 	d := &Dict{
@@ -49,12 +54,14 @@ func NewDict(arena *Arena) *Dict {
 	return d
 }
 
+// StoreMeta 将 Dict 的元数据序列化到 Arena 指定偏移位置。
 func (d *Dict) StoreMeta(off int) {
 	d.arena.WriteUint32(off, uint32(d.table))
 	d.arena.WriteUint32(off+4, uint32(d.size))
 	d.arena.WriteUint32(off+8, uint32(d.used))
 }
 
+// LoadDictMeta 从 Arena 指定偏移位置反序列化 Dict 元数据。
 func LoadDictMeta(arena *Arena, off int) *Dict {
 	table := int(arena.ReadUint32(off))
 	size := int(arena.ReadUint32(off + 4))
@@ -107,6 +114,7 @@ func (d *Dict) keyEquals(keyOff int, key []byte) bool {
 	return true
 }
 
+// Set 插入或更新键值对。若负载因子超过阈值则先触发 rehash。
 func (d *Dict) Set(key []byte, valOff int) {
 	if d.used*100 >= d.size*dictLoadFactor {
 		d.rehash()
@@ -131,6 +139,7 @@ func (d *Dict) Set(key []byte, valOff int) {
 	}
 }
 
+// Get 根据键查找值，返回值的偏移量和是否存在。
 func (d *Dict) Get(key []byte) (valOff int, ok bool) {
 	h := d.hashKey(key)
 	idx := int(h % uint32(d.size))
@@ -147,6 +156,7 @@ func (d *Dict) Get(key []byte) (valOff int, ok bool) {
 	}
 }
 
+// Del 删除指定键。返回是否成功删除。
 func (d *Dict) Del(key []byte) bool {
 	h := d.hashKey(key)
 	idx := int(h % uint32(d.size))
@@ -165,6 +175,7 @@ func (d *Dict) Del(key []byte) bool {
 	}
 }
 
+// rehash 将哈希表扩容为原来的两倍，并重新哈希所有已有键值对。
 func (d *Dict) rehash() {
 	newSize := d.size * 2
 	newTableOff := d.arena.Alloc(newSize * dictSlotSize)
@@ -192,6 +203,7 @@ func (d *Dict) rehash() {
 	}
 }
 
+// fnv32 对字节切片计算 FNV-1a 32 位哈希值。
 func fnv32(data []byte) uint32 {
 	var h uint32 = 2166136261
 	for _, b := range data {
@@ -201,6 +213,7 @@ func fnv32(data []byte) uint32 {
 	return h
 }
 
+// fnv32U16 对 uint16 值计算 FNV-1a 32 位哈希值。
 func fnv32U16(v uint16) uint32 {
 	h := uint32(2166136261)
 	h ^= uint32(byte(v))
@@ -210,6 +223,7 @@ func fnv32U16(v uint16) uint32 {
 	return h
 }
 
+// fnv32Byte 对单字节计算 FNV-1a 32 位哈希值。
 func fnv32Byte(b byte) uint32 {
 	h := uint32(2166136261)
 	h ^= uint32(b)

@@ -20,19 +20,22 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+// 地理位置（Geo）实现，基于 Geohash 编码和有序集合（ZSet）存储。
+// 使用 Haversine 公式计算球面距离。
 package gedis
 
 import "math"
 
 const (
-	earthRadiusMeters = 6372797.560856
-	geoHashMaxBits    = 52
-	geoLatMin         = -85.05112878
-	geoLatMax         = 85.05112878
-	geoLonMin         = -180.0
-	geoLonMax         = 180.0
+	earthRadiusMeters = 6372797.560856 // 地球半径（米）
+	geoHashMaxBits    = 52             // Geohash 最大比特数
+	geoLatMin         = -85.05112878   // 最小纬度
+	geoLatMax         = 85.05112878    // 最大纬度
+	geoLonMin         = -180.0         // 最小经度
+	geoLonMax         = 180.0          // 最大经度
 )
 
+// geohashEncode 对经纬度进行 Geohash 编码，返回 52 位哈希值。
 func geohashEncode(lon, lat float64) uint64 {
 	lonRange := [2]float64{geoLonMin, geoLonMax}
 	latRange := [2]float64{geoLatMin, geoLatMax}
@@ -61,6 +64,7 @@ func geohashEncode(lon, lat float64) uint64 {
 	return hash
 }
 
+// geohashDecode 对 Geohash 编码进行解码，返回经纬度。
 func geohashDecode(hash uint64) (lon, lat float64) {
 	lonRange := [2]float64{geoLonMin, geoLonMax}
 	latRange := [2]float64{geoLatMin, geoLatMax}
@@ -89,12 +93,17 @@ func geohashDecode(hash uint64) (lon, lat float64) {
 	return
 }
 
+// GeoAdd 添加地理位置坐标。内部使用 Geohash 作为 ZSet 的 score。
 func (db *RedisDB) GeoAdd(key string, lon, lat float64, member string) int {
 	hash := geohashEncode(lon, lat)
 	score := float64(hash)
-	return db.ZAdd(key, score, []byte(member))
+	pb := Buf(member)
+	n := db.ZAdd(key, score, pb)
+	pb.Close()
+	return n
 }
 
+// GeoDist 计算两个地理位置成员之间的距离。
 func (db *RedisDB) GeoDist(key, member1, member2, unit string) float64 {
 	_, lon1, lat1, ok1 := db.geoGetCoords(key, member1)
 	_, lon2, lat2, ok2 := db.geoGetCoords(key, member2)
@@ -118,6 +127,7 @@ func (db *RedisDB) GeoDist(key, member1, member2, unit string) float64 {
 	}
 }
 
+// GeoRadius 获取以指定坐标为中心、指定半径范围内的地理位置成员。
 func (db *RedisDB) GeoRadius(key string, lon, lat, radius float64, unit string) []string {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -159,6 +169,7 @@ func (db *RedisDB) GeoRadius(key string, lon, lat, radius float64, unit string) 
 	return result
 }
 
+// GeoRadiusByMember 获取以指定成员位置为中心、指定半径范围内的成员。
 func (db *RedisDB) GeoRadiusByMember(key, member string, radius float64, unit string) []string {
 	_, lon, lat, ok := db.geoGetCoords(key, member)
 	if !ok {
@@ -186,7 +197,9 @@ func (db *RedisDB) GeoPos(key string, members ...string) [][2]float64 {
 }
 
 func (db *RedisDB) geoGetCoords(key, member string) (hash uint64, lon, lat float64, ok bool) {
-	score, found := db.ZScore(key, []byte(member))
+	pb := Buf(member)
+	score, found := db.ZScore(key, pb)
+	pb.Close()
 	if !found {
 		return 0, 0, 0, false
 	}

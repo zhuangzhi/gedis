@@ -20,6 +20,8 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+// 流（Stream）实现，支持追加消费模型，包含消费者组（Consumer Group）功能。
+// 流条目按时间戳+序列号组成的 ID 有序存储。
 package gedis
 
 import (
@@ -28,9 +30,10 @@ import (
 	"strings"
 )
 
+// StreamEntry 流条目，包含唯一 ID 和键值对字段。
 type StreamEntry struct {
 	ID     string
-	Fields map[string][]byte
+	Fields map[string]*PooledBuffer
 }
 
 const (
@@ -53,7 +56,8 @@ func streamEntryPrev(entOff int) int       { return entOff + 20 }
 func streamEntryFieldCount(entOff int) int { return entOff + 24 }
 func streamEntryData(entOff int) int       { return entOff + streamEntryBase }
 
-func (db *RedisDB) XAdd(key string, id string, fields map[string][]byte) string {
+// XAdd 向流中添加一条新条目。自动生成或使用指定的 ID。
+func (db *RedisDB) XAdd(key string, id string, fields map[string]*PooledBuffer) string {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -131,6 +135,7 @@ func (db *RedisDB) XAdd(key string, id string, fields map[string][]byte) string 
 	return formatStreamID(ms, seq)
 }
 
+// XRead 从多个流中读取从指定 ID 之后的新条目。
 func (db *RedisDB) XRead(streams map[string]string, count int) map[string][]StreamEntry {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -181,6 +186,7 @@ func (db *RedisDB) XRead(streams map[string]string, count int) map[string][]Stre
 	return result
 }
 
+// XGroupCreate 为指定流创建消费者组。
 func (db *RedisDB) XGroupCreate(key, group, startID string) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -282,12 +288,12 @@ func (db *RedisDB) XLen(key string) int {
 	return int(db.arena.ReadUint32(streamEntryCount(dataOff)))
 }
 
-func (db *RedisDB) streamWriteEntry(ms, seq uint64, fields map[string][]byte) int {
+func (db *RedisDB) streamWriteEntry(ms, seq uint64, fields map[string]*PooledBuffer) int {
 	fieldCount := len(fields)
 
 	totalFieldsSize := 0
 	for k, v := range fields {
-		totalFieldsSize += 4 + len(k) + 4 + len(v)
+		totalFieldsSize += 4 + len(k) + 4 + v.Len()
 	}
 
 	entSize := streamEntryBase + totalFieldsSize
@@ -306,10 +312,11 @@ func (db *RedisDB) streamWriteEntry(ms, seq uint64, fields map[string][]byte) in
 		pos += 4
 		db.arena.WriteBytes(pos, kb)
 		pos += len(kb)
-		db.arena.WriteUint32(pos, uint32(len(v)))
+		vb := v.Bytes()
+		db.arena.WriteUint32(pos, uint32(len(vb)))
 		pos += 4
-		db.arena.WriteBytes(pos, v)
-		pos += len(v)
+		db.arena.WriteBytes(pos, vb)
+		pos += len(vb)
 	}
 
 	return entOff
@@ -320,7 +327,7 @@ func (db *RedisDB) streamReadEntry(entOff int) StreamEntry {
 	seq := db.arena.ReadUint64(streamEntrySeq(entOff))
 	fieldCount := int(db.arena.ReadUint32(streamEntryFieldCount(entOff)))
 
-	fields := make(map[string][]byte, fieldCount)
+	fields := make(map[string]*PooledBuffer, fieldCount)
 	pos := streamEntryData(entOff)
 
 	for i := 0; i < fieldCount; i++ {
@@ -332,7 +339,9 @@ func (db *RedisDB) streamReadEntry(entOff int) StreamEntry {
 		pos += 4
 		val := db.arena.ReadBytes(pos, vLen)
 		pos += vLen
-		fields[string(key)] = val
+		pb := NewBuf(len(val))
+		pb.buf.Write(val)
+		fields[string(key)] = pb
 	}
 
 	return StreamEntry{
