@@ -229,6 +229,8 @@ func (db *RedisDB) BitOp(op string, destKey string, srcKeys ...string) int {
 }
 
 // BitField 在位图上执行 GET、SET、INCRBY 子命令。
+// 对应 Redis: BITFIELD key [GET type offset] [SET type offset value] [INCRBY type offset increment]
+// 优化：入参使用 *PooledBuffer 替代 []byte，调用方通过 Buf(s) 获取后即可 Close。
 func (db *RedisDB) BitField(key string, args ...*PooledBuffer) []int64 {
 	db.mu.Lock()
 	defer db.mu.Unlock()

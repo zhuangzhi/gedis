@@ -32,7 +32,21 @@ func setValToBuf(val []byte) *PooledBuffer {
 	return pb
 }
 
-func (db *RedisDB) SAdd(key string, members ...*PooledBuffer) int {
+// SAdd 向集合中添加成员。对外友好 API，入参 []byte。
+func (db *RedisDB) SAdd(key string, members ...[]byte) int {
+	bufs := make([]*PooledBuffer, len(members))
+	for i, m := range members {
+		bufs[i] = BufFromBytes(m)
+	}
+	result := db.SAddBuffer(key, bufs...)
+	for _, b := range bufs {
+		b.Close()
+	}
+	return result
+}
+
+// SAddBuffer 向集合中添加成员，入参 *PooledBuffer 避免堆分配。
+func (db *RedisDB) SAddBuffer(key string, members ...*PooledBuffer) int {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -102,7 +116,21 @@ func (db *RedisDB) SAdd(key string, members ...*PooledBuffer) int {
 	return 0
 }
 
-func (db *RedisDB) SRem(key string, members ...*PooledBuffer) int {
+// SRem 从集合中移除成员。对外友好 API，入参 []byte。
+func (db *RedisDB) SRem(key string, members ...[]byte) int {
+	bufs := make([]*PooledBuffer, len(members))
+	for i, m := range members {
+		bufs[i] = BufFromBytes(m)
+	}
+	result := db.SRemBuffer(key, bufs...)
+	for _, b := range bufs {
+		b.Close()
+	}
+	return result
+}
+
+// SRemBuffer 从集合中移除成员，入参 *PooledBuffer 避免堆分配。
+func (db *RedisDB) SRemBuffer(key string, members ...*PooledBuffer) int {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -146,7 +174,16 @@ func (db *RedisDB) SRem(key string, members ...*PooledBuffer) int {
 	return 0
 }
 
-func (db *RedisDB) SIsMember(key string, member *PooledBuffer) bool {
+// SIsMember 判断成员是否在集合中。对外友好 API，入参 []byte。
+func (db *RedisDB) SIsMember(key string, member []byte) bool {
+	pb := BufFromBytes(member)
+	result := db.SIsMemberBuffer(key, pb)
+	pb.Close()
+	return result
+}
+
+// SIsMemberBuffer 判断成员是否在集合中，入参 *PooledBuffer 避免堆分配。
+func (db *RedisDB) SIsMemberBuffer(key string, member *PooledBuffer) bool {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -174,10 +211,14 @@ func (db *RedisDB) SIsMember(key string, member *PooledBuffer) bool {
 	return false
 }
 
-func (db *RedisDB) SMembers(key string) []*PooledBuffer {
+// SMembers 获取集合中的所有成员。返回 *ZSlices，遍历后须 zs.Close()。
+func (db *RedisDB) SMembers(key string) *ZSlices {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
+	return db.smembersLocked(key)
+}
 
+func (db *RedisDB) smembersLocked(key string) *ZSlices {
 	keyBytes := []byte(key)
 	headOff, ok := db.dict.Get(keyBytes)
 	if !ok {
@@ -190,27 +231,29 @@ func (db *RedisDB) SMembers(key string) []*PooledBuffer {
 	if enc == ObjEncodingIntset {
 		isOff := dataOff
 		n := intsetLen(db.arena, isOff)
-		result := make([]*PooledBuffer, 0, n)
+		result := NewZSlices()
 		for i := 0; i < n; i++ {
 			val := intsetGet(db.arena, isOff, i)
 			buf := make([]byte, 8)
 			binary.LittleEndian.PutUint64(buf, uint64(val))
-			result = append(result, setValToBuf(buf))
+			result.Add(buf)
 		}
+		result.Finish()
 		return result
 	}
 
 	if enc == ObjEncodingHashtable {
 		innerDict := LoadDictMeta(db.arena, dataOff)
-		result := make([]*PooledBuffer, 0)
+		result := NewZSlices()
 		for i := 0; i < innerDict.size; i++ {
 			kOff, _ := innerDict.getSlot(i)
 			if kOff != 0 {
 				size := db.arena.SizeAt(kOff)
 				key := db.arena.ReadBytes(kOff, size)
-				result = append(result, setValToBuf(key))
+				result.Add(key)
 			}
 		}
+		result.Finish()
 		return result
 	}
 
@@ -242,7 +285,8 @@ func (db *RedisDB) SCard(key string) int {
 	return 0
 }
 
-func (db *RedisDB) SInter(keys ...string) []*PooledBuffer {
+// SInter 获取多个集合的交集。返回 *ZSlices，遍历后须 zs.Close()。
+func (db *RedisDB) SInter(keys ...string) *ZSlices {
 	if len(keys) == 0 {
 		return nil
 	}
@@ -250,51 +294,61 @@ func (db *RedisDB) SInter(keys ...string) []*PooledBuffer {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
-	var result []*PooledBuffer
-	first := true
+	result := db.smembersLocked(keys[0])
+	if result == nil {
+		return nil
+	}
 
-	for _, key := range keys {
-		members := db.SMembers(key)
-		if first {
-			result = members
-			first = false
-			continue
+	for _, key := range keys[1:] {
+		other := db.smembersLocked(key)
+		if other == nil {
+			return nil
 		}
 
-		set := make(map[string]bool, len(members))
-		for _, m := range members {
-			set[m.String()] = true
+		set := make(map[string]bool, other.Len())
+		for i := 0; i < other.Len(); i++ {
+			set[string(other.Get(i))] = true
 		}
+		other.Close()
 
-		filtered := make([]*PooledBuffer, 0)
-		for _, m := range result {
-			if set[m.String()] {
-				filtered = append(filtered, m)
+		filtered := NewZSlices()
+		for i := 0; i < result.Len(); i++ {
+			s := string(result.Get(i))
+			if set[s] {
+				filtered.Add(result.Get(i))
 			}
 		}
+		result.Close()
+		filtered.Finish()
 		result = filtered
 	}
 
 	return result
 }
 
-func (db *RedisDB) SUnion(keys ...string) []*PooledBuffer {
+// SUnion 获取多个集合的并集。返回 *ZSlices，遍历后须 zs.Close()。
+func (db *RedisDB) SUnion(keys ...string) *ZSlices {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
 	seen := make(map[string]bool)
-	var result []*PooledBuffer
+	result := NewZSlices()
 
 	for _, key := range keys {
-		for _, m := range db.SMembers(key) {
-			s := m.String()
+		zs := db.smembersLocked(key)
+		if zs == nil {
+			continue
+		}
+		for i := 0; i < zs.Len(); i++ {
+			s := string(zs.Get(i))
 			if !seen[s] {
 				seen[s] = true
-				result = append(result, m)
+				result.Add(zs.Get(i))
 			}
 		}
+		zs.Close()
 	}
-
+	result.Finish()
 	return result
 }
 
@@ -361,183 +415,108 @@ func intsetAdd(arena *Arena, isOff *int, value int64) bool {
 	n := intsetLen(arena, *isOff)
 	enc := intsetEncoding(arena, *isOff)
 
-	neededEnc := enc
-	switch {
-	case value >= -32768 && value <= 32767:
-		if enc < 2 {
-			neededEnc = 2
-		}
-	case value >= -2147483648 && value <= 2147483647:
-		if enc < 4 {
-			neededEnc = 4
-		}
-	default:
-		neededEnc = 8
+	newEnc := enc
+	if value < -32768 || value > 32767 {
+		newEnc = 8
+	} else if value < -128 || value > 127 {
+		newEnc = 4
 	}
 
-	if neededEnc > enc {
-		newIsOff := intsetUpgradeAndAdd(arena, *isOff, value)
-		*isOff = newIsOff
+	if newEnc > enc {
+		newSize := 6 + (n+1)*newEnc
+		newOff := arena.Alloc(newSize)
+		arena.WriteUint16(intsetEncodingOff(arena, newOff), uint16(newEnc))
+		arena.WriteUint32(intsetLengthOff(arena, newOff), uint32(n+1))
+		newContentsOff := intsetContentsOff(arena, newOff)
+
+		inserted := false
+		di := 0
+		for si := 0; si < n; si++ {
+			oldVal := intsetGet(arena, *isOff, si)
+			if !inserted && value < oldVal {
+				writeInt(arena, newContentsOff+di*newEnc, newEnc, value)
+				di++
+				inserted = true
+			}
+			writeInt(arena, newContentsOff+di*newEnc, newEnc, oldVal)
+			di++
+		}
+		if !inserted {
+			writeInt(arena, newContentsOff+di*newEnc, newEnc, value)
+		}
+
+		arena.Free(*isOff)
+		*isOff = newOff
 		return true
 	}
 
-	oldSize := 6 + n*enc
-	newSize := 6 + (n+1)*neededEnc
-
-	data := arena.ReadBytes(*isOff, oldSize)
-	arena.Free(*isOff)
-	newOff := arena.Alloc(newSize)
-	arena.WriteBytes(newOff, data)
-
-	var insertPos int
-	for insertPos = 0; insertPos < n; insertPos++ {
-		if intsetGet(arena, newOff, insertPos) > value {
-			break
-		}
-	}
-
-	newContentsOff := intsetContentsOff(arena, newOff)
-	arena.WriteUint32(intsetLengthOff(arena, newOff), uint32(n+1))
-
-	for i := n; i > insertPos; i-- {
-		oldVal := intsetGet(arena, newOff, i-1)
-		switch enc {
-		case 2:
-			arena.WriteUint16(newContentsOff+i*2, uint16(oldVal))
-		case 4:
-			arena.WriteUint32(newContentsOff+i*4, uint32(oldVal))
-		case 8:
-			arena.WriteUint64(newContentsOff+i*8, uint64(oldVal))
-		}
-	}
-
-	switch enc {
-	case 2:
-		arena.WriteUint16(newContentsOff+insertPos*2, uint16(value))
-	case 4:
-		arena.WriteUint32(newContentsOff+insertPos*4, uint32(value))
-	case 8:
-		arena.WriteUint64(newContentsOff+insertPos*8, uint64(value))
-	}
-
-	*isOff = newOff
-	return true
-}
-
-func intsetRemove(arena *Arena, isOff *int, value int64) bool {
-	n := intsetLen(arena, *isOff)
-	enc := intsetEncoding(arena, *isOff)
-
-	pos := -1
+	insertPos := n
 	for i := 0; i < n; i++ {
-		if intsetGet(arena, *isOff, i) == value {
-			pos = i
+		if intsetGet(arena, *isOff, i) > value {
+			insertPos = i
 			break
 		}
-	}
-	if pos == -1 {
-		return false
-	}
-
-	contentsOff := intsetContentsOff(arena, *isOff)
-	for i := pos; i < n-1; i++ {
-		nextVal := intsetGet(arena, *isOff, i+1)
-		switch enc {
-		case 2:
-			arena.WriteUint16(contentsOff+i*2, uint16(nextVal))
-		case 4:
-			arena.WriteUint32(contentsOff+i*4, uint32(nextVal))
-		case 8:
-			arena.WriteUint64(contentsOff+i*8, uint64(nextVal))
-		}
-	}
-
-	arena.WriteUint32(intsetLengthOff(arena, *isOff), uint32(n-1))
-	return true
-}
-
-func intsetUpgradeAndAdd(arena *Arena, isOff int, value int64) int {
-	n := intsetLen(arena, isOff)
-	oldEnc := intsetEncoding(arena, isOff)
-	newEnc := 2
-	if value < -32768 || value > 32767 {
-		newEnc = 4
-	}
-	if value < -2147483648 || value > 2147483647 {
-		newEnc = 8
-	}
-	if newEnc < oldEnc {
-		newEnc = oldEnc
 	}
 
 	newSize := 6 + (n+1)*newEnc
 	newOff := arena.Alloc(newSize)
 	arena.WriteUint16(intsetEncodingOff(arena, newOff), uint16(newEnc))
 	arena.WriteUint32(intsetLengthOff(arena, newOff), uint32(n+1))
-
 	newContentsOff := intsetContentsOff(arena, newOff)
-	oldContentsOff := intsetContentsOff(arena, isOff)
 
-	prepend := value < 0
-	insertPos := 0
-	if prepend {
-		switch newEnc {
-		case 2:
-			arena.WriteUint16(newContentsOff, uint16(value))
-		case 4:
-			arena.WriteUint32(newContentsOff, uint32(value))
-		case 8:
-			arena.WriteUint64(newContentsOff, uint64(value))
-		}
-		insertPos = 1
+	for i := 0; i < insertPos; i++ {
+		writeInt(arena, newContentsOff+i*newEnc, newEnc, intsetGet(arena, *isOff, i))
+	}
+	writeInt(arena, newContentsOff+insertPos*newEnc, newEnc, value)
+	for i := insertPos; i < n; i++ {
+		writeInt(arena, newContentsOff+(i+1)*newEnc, newEnc, intsetGet(arena, *isOff, i))
 	}
 
-	for i := 0; i < n; i++ {
-		var oldVal int64
-		switch oldEnc {
-		case 2:
-			oldVal = int64(int16(arena.ReadUint16(oldContentsOff + i*2)))
-		case 4:
-			oldVal = int64(int32(arena.ReadUint32(oldContentsOff + i*4)))
-		case 8:
-			oldVal = int64(arena.ReadUint64(oldContentsOff + i*8))
-		}
+	arena.Free(*isOff)
+	*isOff = newOff
 
-		if !prepend && oldVal > value {
-			switch newEnc {
-			case 2:
-				arena.WriteUint16(newContentsOff+insertPos*2, uint16(value))
-			case 4:
-				arena.WriteUint32(newContentsOff+insertPos*4, uint32(value))
-			case 8:
-				arena.WriteUint64(newContentsOff+insertPos*8, uint64(value))
-			}
-			insertPos++
-			prepend = true
-		}
+	return true
+}
 
-		switch newEnc {
-		case 2:
-			arena.WriteUint16(newContentsOff+insertPos*2, uint16(oldVal))
-		case 4:
-			arena.WriteUint32(newContentsOff+insertPos*4, uint32(oldVal))
-		case 8:
-			arena.WriteUint64(newContentsOff+insertPos*8, uint64(oldVal))
-		}
-		insertPos++
+func intsetRemove(arena *Arena, isOff *int, value int64) bool {
+	if !intsetFind(arena, *isOff, value) {
+		return false
 	}
 
-	if !prepend {
-		switch newEnc {
-		case 2:
-			arena.WriteUint16(newContentsOff+insertPos*2, uint16(value))
-		case 4:
-			arena.WriteUint32(newContentsOff+insertPos*4, uint32(value))
-		case 8:
-			arena.WriteUint64(newContentsOff+insertPos*8, uint64(value))
+	n := intsetLen(arena, *isOff)
+	enc := intsetEncoding(arena, *isOff)
+
+	newSize := 6 + (n-1)*enc
+	newOff := arena.Alloc(newSize)
+	arena.WriteUint16(intsetEncodingOff(arena, newOff), uint16(enc))
+	arena.WriteUint32(intsetLengthOff(arena, newOff), uint32(n-1))
+	newContentsOff := intsetContentsOff(arena, newOff)
+
+	found := false
+	di := 0
+	for si := 0; si < n; si++ {
+		oldVal := intsetGet(arena, *isOff, si)
+		if !found && oldVal == value {
+			found = true
+			continue
 		}
+		writeInt(arena, newContentsOff+di*enc, enc, oldVal)
+		di++
 	}
 
-	arena.Free(isOff)
-	return newOff
+	arena.Free(*isOff)
+	*isOff = newOff
+
+	return true
+}
+
+func writeInt(arena *Arena, off int, enc int, val int64) {
+	switch enc {
+	case 2:
+		arena.WriteUint16(off, uint16(val))
+	case 4:
+		arena.WriteUint32(off, uint32(val))
+	case 8:
+		arena.WriteUint64(off, uint64(val))
+	}
 }

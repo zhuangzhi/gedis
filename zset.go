@@ -22,8 +22,16 @@
 
 package gedis
 
-// ZAdd 向有序集合中添加成员及其分数。使用跳跃表作为底层数据结构。
-func (db *RedisDB) ZAdd(key string, score float64, member *PooledBuffer) int {
+// ZAdd 向有序集合中添加成员及其分数。对外友好 API，member 入参 []byte。
+func (db *RedisDB) ZAdd(key string, score float64, member []byte) int {
+	pb := BufFromBytes(member)
+	result := db.ZAddBuffer(key, score, pb)
+	pb.Close()
+	return result
+}
+
+// ZAddBuffer 向有序集合中添加成员，入参 *PooledBuffer 避免堆分配。
+func (db *RedisDB) ZAddBuffer(key string, score float64, member *PooledBuffer) int {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -68,8 +76,16 @@ func (db *RedisDB) ZAdd(key string, score float64, member *PooledBuffer) int {
 	return 0
 }
 
-// ZRem 从有序集合中删除指定成员。
-func (db *RedisDB) ZRem(key string, member *PooledBuffer) bool {
+// ZRem 从有序集合中删除指定成员。对外友好 API，member 入参 []byte。
+func (db *RedisDB) ZRem(key string, member []byte) bool {
+	pb := BufFromBytes(member)
+	result := db.ZRemBuffer(key, pb)
+	pb.Close()
+	return result
+}
+
+// ZRemBuffer 从有序集合中删除指定成员，入参 *PooledBuffer 避免堆分配。
+func (db *RedisDB) ZRemBuffer(key string, member *PooledBuffer) bool {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -121,8 +137,16 @@ func (db *RedisDB) ZRem(key string, member *PooledBuffer) bool {
 	return false
 }
 
-// ZScore 获取有序集合中指定成员的分数。
-func (db *RedisDB) ZScore(key string, member *PooledBuffer) (float64, bool) {
+// ZScore 获取有序集合中指定成员的分数。对外友好 API，member 入参 []byte。
+func (db *RedisDB) ZScore(key string, member []byte) (float64, bool) {
+	pb := BufFromBytes(member)
+	result1, result2 := db.ZScoreBuffer(key, pb)
+	pb.Close()
+	return result1, result2
+}
+
+// ZScoreBuffer 获取有序集合中指定成员的分数，入参 *PooledBuffer 避免堆分配。
+func (db *RedisDB) ZScoreBuffer(key string, member *PooledBuffer) (float64, bool) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -152,7 +176,7 @@ func (db *RedisDB) ZScore(key string, member *PooledBuffer) (float64, bool) {
 	return 0, false
 }
 
-// ZRange 获取有序集合中指定排名范围的成员，返回 ZSlices 零分配视图。
+// ZRange 获取有序集合中指定排名范围的成员。返回 *ZSlices，遍历后须 zs.Close()。
 func (db *RedisDB) ZRange(key string, start, stop int) *ZSlices {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -186,7 +210,6 @@ func (db *RedisDB) ZRange(key string, start, stop int) *ZSlices {
 			return nil
 		}
 
-		// count := stop - start + 1
 		totalBytes := 0
 		x := int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, zsl.headerOff, 0)))
 		idx := 0
@@ -203,24 +226,24 @@ func (db *RedisDB) ZRange(key string, start, stop int) *ZSlices {
 		}
 
 		result := NewZSlices()
-		mPos := 0
 		x = int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, zsl.headerOff, 0)))
 		idx = 0
 		out := 0
 		for x != 0 {
-			if idx >= start {
+			if idx >= start && idx <= stop {
 				xMemberOff := int(db.arena.ReadUint32(zslNodeMemberOff(db.arena, x)))
 				sz := db.arena.SizeAt(xMemberOff)
 				result.Add(db.arena.GetSlice(xMemberOff, sz))
-				mPos += sz
 				out++
 			}
-			if idx >= stop {
+			if idx > stop {
 				break
 			}
 			x = int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, x, 0)))
 			idx++
 		}
+		_ = totalBytes
+		_ = out
 		result.Finish()
 		return result
 	}
@@ -229,6 +252,7 @@ func (db *RedisDB) ZRange(key string, start, stop int) *ZSlices {
 }
 
 // ZRangeIter 对有序集合指定排名范围的成员进行零分配回调遍历。
+// fn 接收的 []byte 仅在回调内有效，不得持有到回调外。
 func (db *RedisDB) ZRangeIter(key string, start, stop int, fn func(member []byte)) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -279,7 +303,8 @@ func (db *RedisDB) ZRangeIter(key string, start, stop int, fn func(member []byte
 }
 
 // ZRangeWithScores 获取有序集合中指定排名范围的成员及其分数。
-func (db *RedisDB) ZRangeWithScores(key string, start, stop int) ([]string, []float64) {
+// 成员通过 *ZSlices 返回，scores 为对应的分数数组。遍历后须 zs.Close()。
+func (db *RedisDB) ZRangeWithScores(key string, start, stop int) (*ZSlices, []float64) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -312,7 +337,7 @@ func (db *RedisDB) ZRangeWithScores(key string, start, stop int) ([]string, []fl
 			return nil, nil
 		}
 
-		members := make([]string, 0, stop-start+1)
+		members := NewZSlices()
 		scores := make([]float64, 0, stop-start+1)
 
 		x := int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, zsl.headerOff, 0)))
@@ -320,9 +345,9 @@ func (db *RedisDB) ZRangeWithScores(key string, start, stop int) ([]string, []fl
 		for x != 0 {
 			if idx >= start && idx <= stop {
 				xMemberOff := int(db.arena.ReadUint32(zslNodeMemberOff(db.arena, x)))
-				member := db.arena.ReadBytes(xMemberOff, db.arena.SizeAt(xMemberOff))
+				member := db.arena.GetSlice(xMemberOff, db.arena.SizeAt(xMemberOff))
 				score := db.arena.ReadFloat64(zslNodeScoreOff(db.arena, x))
-				members = append(members, string(member))
+				members.Add(member)
 				scores = append(scores, score)
 			}
 			if idx > stop {
@@ -331,14 +356,15 @@ func (db *RedisDB) ZRangeWithScores(key string, start, stop int) ([]string, []fl
 			x = int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, x, 0)))
 			idx++
 		}
+		members.Finish()
 		return members, scores
 	}
 
 	return nil, nil
 }
 
-// ZRangeByScore 获取有序集合中分数在 [min, max] 范围内的成员。
-func (db *RedisDB) ZRangeByScore(key string, min, max float64) []*PooledBuffer {
+// ZRangeByScore 获取有序集合中分数在 [min, max] 范围内的成员。返回 *ZSlices。
+func (db *RedisDB) ZRangeByScore(key string, min, max float64) *ZSlices {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -353,23 +379,22 @@ func (db *RedisDB) ZRangeByScore(key string, min, max float64) []*PooledBuffer {
 
 	if enc == ObjEncodingSkiplist {
 		zsl := zslLoadFromArena(db.arena, dataOff)
-		var result []*PooledBuffer
+		result := NewZSlices()
 
 		x := int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, zsl.headerOff, 0)))
 		for x != 0 {
 			score := db.arena.ReadFloat64(zslNodeScoreOff(db.arena, x))
 			if score >= min && score <= max {
 				xMemberOff := int(db.arena.ReadUint32(zslNodeMemberOff(db.arena, x)))
-				member := db.arena.ReadBytes(xMemberOff, db.arena.SizeAt(xMemberOff))
-				pb := NewBuf(len(member))
-				pb.buf.Write(member)
-				result = append(result, pb)
+				member := db.arena.GetSlice(xMemberOff, db.arena.SizeAt(xMemberOff))
+				result.Add(member)
 			}
 			if score > max {
 				break
 			}
 			x = int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, x, 0)))
 		}
+		result.Finish()
 		return result
 	}
 

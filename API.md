@@ -5,6 +5,7 @@
 ## 目录
 
 - [快速开始](#快速开始)
+- [优化设计：PooledBuffer 与 ZSlices](#优化设计pooledbuffer-与-zslices)
 - [通用键操作](#通用键操作)
 - [字符串](#字符串)
 - [列表](#列表)
@@ -57,14 +58,125 @@ func main() {
     members := db.SMembers("users")
     for _, m := range members {
         fmt.Println("  user:", m.String())
+        m.Close()
     }
 
     results := db.ZRange("scores", 0, -1)
     for i := 0; i < results.Len(); i++ {
         fmt.Printf("  #%d: %s\n", i+1, string(results.Get(i)))
     }
+    results.Close()
 }
 ```
+
+---
+
+## 优化设计：PooledBuffer 与 ZSlices
+
+gedis 所有公开 API 均经过零分配优化，使用 `*PooledBuffer` 替代 `[]byte`、`*ZSlices` 替代 `[]string` / `[][]byte`。
+
+### 为什么不用原生 Go 类型？
+
+| 原生类型 | GC 问题 | 典型影响 |
+|----------|---------|----------|
+| `[]byte` | 每次 `make([]byte, n)` 产生堆分配 | ZAdd：12288B/op |
+| `string → []byte` | `[]byte(s)` = make+copy 堆分配 | PFAdd：12288B/op |
+| `[][]byte` | N 个元素 = N 次独立 make | ZRange 100元素：101 allocs |
+| `[]string` | 同 `[][]byte`，每个 string 底层也逃逸 | HGetAll：~100 allocs |
+| `map[string][]byte` | 每个 key/value 独立堆分配 | HGetAll：大量 allocs |
+
+> 在高吞吐场景下，每秒数以亿计的小对象分配会触发频繁 GC STW，严重影响延迟和吞吐。
+
+### PooledBuffer（替代 `[]byte`）
+
+缓冲区从全局分级对象池（6 档：1K / 4K / 16K / 64K / 256K / 1M）分配，使用后须 `Close()` 归还。
+
+```
+Buf(s) / NewBuf(cap) → 池获取 → 写入数据 → 传给 API → pb.Close() → 归还池
+                                                              ↑
+                                                         必须调用！
+```
+
+| 契约 | 说明 |
+|------|------|
+| **入参** | 传给 API 后**立即** `Close()`，API 内部已拷贝/持有数据 |
+| **返回值** | 调用方读取 `.Bytes()` / `.String()` 后**必须** `Close()` |
+| **不 Close 的后果** | 缓冲区泄漏，失去池复用效果，GC 压力回升 |
+
+**作为 API 入参**：
+
+```go
+pb := gedis.Buf("hello")
+db.Set("key", pb)
+pb.Close()  // ← 必须！传入后立即归还
+```
+
+**作为 API 返回值**：
+
+```go
+val, ok := db.Get("key")
+if ok {
+    fmt.Println(val.String())  // 转为 string 使用
+    val.Close()                // ← 必须！归还池
+}
+```
+
+### ZSlices（替代 `[]string` / `[][]byte`）
+
+所有元素紧凑存储在单个 PooledBuffer 中，格式为 `[count(4B)][len₁(4B)][data₁][len₂(4B)][data₂]...`。`Get(i)` 零拷贝返回内部 `[]byte` 子切片。
+
+| 特性 | 说明 |
+|------|------|
+| **原理** | 单次池分配，紧凑存储所有元素 |
+| **Get(i)** | 零拷贝 —— 直接返回内部缓冲区子切片 |
+| **对比** | ZRange 100 元素：原生 `[][]byte` = 101 次分配 → `ZSlices` = 1 次池分配 |
+| **契约** | 使用完**必须** `Close()` 归还底层 PooledBuffer |
+
+**使用模式**：
+
+```go
+zs := db.ZRange("leaderboard", 0, -1)
+for i := 0; i < zs.Len(); i++ {
+    fmt.Println(string(zs.Get(i)))
+}
+zs.Close()  // ← 必须！
+```
+
+> **危险**：`Get(i)` 返回的 `[]byte` 生命周期绑定到 ZSlices。`Close()` 后会失效，不可持有到 Close 之后。
+
+### ZRangeIter（零分配回调遍历）
+
+不返回任何对象，通过回调函数逐个传递元素。ZRange 100 元素 = **0 次分配**。
+
+```go
+db.ZRangeIter("leaderboard", 0, -1, func(member []byte) {
+    // member 仅在回调内有效，不能保存到外部变量！
+    fmt.Println(string(member))
+})
+// 无需 Close() —— 没有返回需要归还的对象
+```
+
+> **危险**：回调内保存 `member` 到外部变量，回调结束后 `[]byte` 可能被 Arena 复用覆盖。不需要 Close —— 没用池。
+
+### Arena.GetSlice（零拷贝内部视图）
+
+直接返回 Arena 底层 `[]byte` 的子切片，不分配、不拷贝。仅在 Arena 内部使用，**不在外部 API 暴露**。
+
+```go
+// 内部模式
+slice := arena.GetSlice(offset, size)
+doSomething(slice)
+// 契约：下一个 arena.Alloc 可能触发 grow，slice 即失效
+```
+
+### 类型对比总览
+
+| 场景 | 原生 Go 类型 | 优化类型 | 分配 (100元素) | 释放方式 |
+|------|-------------|----------|---------------|----------|
+| 字符串值读/写 | `[]byte` | `*PooledBuffer` | 0 (池复用) | `Close()` |
+| ZSet 范围查询 | `[][]byte` | `*ZSlices` | 1 (池分配) | `Close()` |
+| ZSet 遍历 | `[][]byte` | `ZRangeIter` 回调 | **0** | 无需释放 |
+| HLL/PFCount | `make([]byte, 12288)` | `Arena.GetSlice` | **0** | 不持有 |
 
 ---
 
@@ -276,6 +388,7 @@ db.RPush("list", gedis.Buf("a"), gedis.Buf("b"), gedis.Buf("c"), gedis.Buf("d"))
 items := db.LRange("list", 1, 2)
 for _, item := range items {
     fmt.Println(item.String())
+    item.Close()
 }
 ```
 
@@ -334,6 +447,7 @@ db.HSet("user:1", "age", gedis.Buf("30"))
 all := db.HGetAll("user:1")
 for field, val := range all {
     fmt.Printf("%s: %s\n", field, val.String())
+    val.Close()
 }
 ```
 
@@ -399,6 +513,7 @@ isMember := db.SIsMember("tags", gedis.Buf("go")) // true
 members := db.SMembers("tags")
 for _, m := range members {
     fmt.Println(m.String())
+    m.Close()
 }
 ```
 
@@ -418,6 +533,10 @@ count := db.SCard("tags")
 db.SAdd("set1", gedis.Buf("a"), gedis.Buf("b"), gedis.Buf("c"))
 db.SAdd("set2", gedis.Buf("b"), gedis.Buf("c"), gedis.Buf("d"))
 result := db.SInter("set1", "set2") // ["b", "c"]
+for _, m := range result {
+    fmt.Println(m.String())
+    m.Close()
+}
 ```
 
 ### `SUnion(keys ...string) []*PooledBuffer`
@@ -428,6 +547,9 @@ result := db.SInter("set1", "set2") // ["b", "c"]
 db.SAdd("set1", gedis.Buf("a"), gedis.Buf("b"))
 db.SAdd("set2", gedis.Buf("b"), gedis.Buf("c"))
 result := db.SUnion("set1", "set2") // ["a", "b", "c"]
+for _, m := range result {
+    m.Close()
+}
 ```
 
 ---
@@ -472,6 +594,7 @@ members := db.ZRange("leaderboard", 0, -1)
 for i := 0; i < members.Len(); i++ {
     fmt.Println(string(members.Get(i)))
 }
+members.Close()
 ```
 
 ### `ZRangeIter(key string, start, stop int, fn func(member []byte))`
@@ -484,15 +607,16 @@ db.ZRangeIter("leaderboard", 0, -1, func(member []byte) {
 })
 ```
 
-### `ZRangeWithScores(key string, start, stop int) ([]string, []float64)`
+### `ZRangeWithScores(key string, start, stop int) (*ZSlices, []float64)`
 
 获取有序集合指定排名范围的成员及其分数。
 
 ```go
 names, scores := db.ZRangeWithScores("leaderboard", 0, -1)
-for i, name := range names {
-    fmt.Printf("%s: %.0f\n", name, scores[i])
+for i := 0; i < names.Len(); i++ {
+    fmt.Printf("%s: %.0f\n", string(names.Get(i)), scores[i])
 }
+names.Close()
 ```
 
 ### `ZRangeByScore(key string, min, max float64) []*PooledBuffer`
@@ -501,6 +625,10 @@ for i, name := range names {
 
 ```go
 members := db.ZRangeByScore("leaderboard", 900, 1100)
+for _, m := range members {
+    fmt.Println(m.String())
+    m.Close()
+}
 ```
 
 ### `ZRemRangeByScore(key string, min, max float64) int`
@@ -572,14 +700,25 @@ results := db.BitField("mykey",
 
 ## HyperLogLog
 
-### `PFAdd(key string, elements ...*PooledBuffer) int`
+### `PFAdd(key string, elements ...[]byte) int`
 
-向 HyperLogLog 中添加元素。
+向 HyperLogLog 中添加元素，使用原生 `[]byte`。
 
 ```go
 db.PFAdd("visitors",
+    []byte("user1"), []byte("user2"), []byte("user3"),
+    []byte("user1"), // 重复，不会更新
+)
+// 返回: 3
+```
+
+### `PFAddBuffer(key string, elements ...*PooledBuffer) int`
+
+向 HyperLogLog 中添加元素，使用 `*PooledBuffer` 避免堆分配。
+
+```go
+db.PFAddBuffer("visitors",
     gedis.Buf("user1"), gedis.Buf("user2"), gedis.Buf("user3"),
-    gedis.Buf("user1"), // 重复，不会更新
 )
 // 返回: 3
 ```
@@ -622,20 +761,28 @@ db.GeoAdd("cities", 121.473, 31.230, "Shanghai")
 dist := db.GeoDist("cities", "Beijing", "Shanghai", "km")
 ```
 
-### `GeoRadius(key string, lon, lat, radius float64, unit string) []string`
+### `GeoRadius(key string, lon, lat, radius float64, unit string) *ZSlices`
 
 获取指定半径范围内的成员。
 
 ```go
 members := db.GeoRadius("cities", 116.397, 39.908, 500, "km")
+for i := 0; i < members.Len(); i++ {
+    fmt.Println(string(members.Get(i)))
+}
+members.Close()
 ```
 
-### `GeoRadiusByMember(key, member string, radius float64, unit string) []string`
+### `GeoRadiusByMember(key, member string, radius float64, unit string) *ZSlices`
 
 获取以某成员为中心半径范围内的成员。
 
 ```go
 nearby := db.GeoRadiusByMember("cities", "Beijing", 1000, "km")
+for i := 0; i < nearby.Len(); i++ {
+    fmt.Println(string(nearby.Get(i)))
+}
+nearby.Close()
 ```
 
 ### `GeoPos(key string, members ...string) [][2]float64`
@@ -930,12 +1077,16 @@ db.FtAdd("idx:books", "book1", map[string]interface{}{
 })
 ```
 
-### `FtSearch(index, query string) []string`
+### `FtSearch(index, query string) *ZSlices`
 
-搜索文档（支持返回多个文档 ID）。
+搜索文档（返回匹配的文档 ID 列表）。
 
 ```go
 results := db.FtSearch("idx:books", "programming")
+for i := 0; i < results.Len(); i++ {
+    fmt.Println(string(results.Get(i)))
+}
+results.Close()
 ```
 
 ---

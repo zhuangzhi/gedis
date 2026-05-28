@@ -20,23 +20,36 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-// HyperLogLog 实现，使用 16384 个 6 位寄存器进行基数估计。
-// 基于 MurmurHash64 哈希函数。
 package gedis
 
-import (
-	"math"
-)
+import "math"
 
+// HyperLogLog 概率计数。使用 16384 个 6-bit 寄存器 (共 12288 字节)。
+// 寄存器直接在 Arena 的 []byte 上操作，零分配。
 const (
-	hllRegisters = 16384        // 寄存器数量
-	hllPMask     = hllRegisters - 1 // 索引掩码
-	hllBits      = 6            // 每寄存器位数
-	hllBytes     = (hllRegisters * hllBits) / 8 // 寄存器总字节数
+	hllRegisters = 16384 // 寄存器数量
+	hllPMask     = hllRegisters - 1
+	hllBits      = 6                            // 每个寄存器 6 bit
+	hllBytes     = (hllRegisters * hllBits) / 8 // 12288
 )
 
-// PFAdd 向 HyperLogLog 中添加元素。返回实际更新的寄存器数量。
-func (db *RedisDB) PFAdd(key string, elements ...*PooledBuffer) int {
+// PFAdd 向 HyperLogLog key 添加元素，返回实际导致寄存器更新的元素数量。
+// 使用原生 []byte 参数，简单直接。高性能场景推荐使用 PFAddBuffer 避免堆分配。
+func (db *RedisDB) PFAdd(key string, elements ...[]byte) int {
+	return db.pfAddImpl(key, elements)
+}
+
+// PFAddBuffer 向 HyperLogLog key 添加元素，使用 PooledBuffer 避免 []byte 堆分配。
+// 调用方通过 Buf(s) 获取 PooledBuffer，传入后立即 Close() 归还池。
+func (db *RedisDB) PFAddBuffer(key string, elements ...*PooledBuffer) int {
+	data := make([][]byte, len(elements))
+	for i, elem := range elements {
+		data[i] = elem.Bytes()
+	}
+	return db.pfAddImpl(key, data)
+}
+
+func (db *RedisDB) pfAddImpl(key string, elements [][]byte) int {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -63,7 +76,7 @@ func (db *RedisDB) PFAdd(key string, elements ...*PooledBuffer) int {
 
 	updated := 0
 	for _, elem := range elements {
-		hash := murmurHash64(elem.Bytes())
+		hash := murmurHash64(elem)
 		idx := int(hash & hllPMask)
 		runLen := countTrailingZeros(hash>>14) + 1
 		if runLen > 64 {
@@ -80,7 +93,8 @@ func (db *RedisDB) PFAdd(key string, elements ...*PooledBuffer) int {
 	return updated
 }
 
-// PFCount 估计 HyperLogLog 的基数。支持同时估算多个 key 的合并基数。
+// PFCount 返回 HyperLogLog key 的基数估计值。
+// 单 key 路径直接在 Arena 切片上估算，零分配。
 func (db *RedisDB) PFCount(keys ...string) int64 {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -136,7 +150,7 @@ func (db *RedisDB) PFCount(keys ...string) int64 {
 	return result
 }
 
-// PFMerge 将多个 HyperLogLog 合并到目标 key 中。
+// PFMerge 将多个 HyperLogLog key 合并到 dest。
 func (db *RedisDB) PFMerge(dest string, sources ...string) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -193,7 +207,7 @@ func (db *RedisDB) PFMerge(dest string, sources ...string) {
 	}
 }
 
-// hllGetRegister 读取指定索引处的 6 位寄存器值。
+// hllGetRegister 从寄存器数组中读取指定索引的 6-bit 值。
 func hllGetRegister(registers []byte, idx int) int {
 	if len(registers) == 0 {
 		return 0
@@ -216,7 +230,7 @@ func hllGetRegister(registers []byte, idx int) int {
 	return val
 }
 
-// hllSetRegister 设置指定索引处的 6 位寄存器值。
+// hllSetRegister 在寄存器数组中写入指定索引的 6-bit 值。
 func hllSetRegister(registers []byte, idx int, val int) {
 	if val > (1<<hllBits)-1 {
 		val = (1 << hllBits) - 1
@@ -247,6 +261,7 @@ func hllSetRegister(registers []byte, idx int, val int) {
 	}
 }
 
+// hllEstimate 使用 HyperLogLog 算法估算基数。
 func hllEstimate(registers []byte) int64 {
 	var sum float64
 	empty := 0
@@ -271,6 +286,7 @@ func hllEstimate(registers []byte) int64 {
 	return int64(estimate)
 }
 
+// murmurHash64 MurmurHash64A 哈希函数，用于 HyperLogLog。
 func murmurHash64(data []byte) uint64 {
 	const (
 		c1 = 0x87c37b91114253d5
@@ -389,6 +405,7 @@ func murmurHash64(data []byte) uint64 {
 	return h1 + h2
 }
 
+// countTrailingZeros 计算 64 位整数的尾部零的数量。
 func countTrailingZeros(v uint64) int {
 	if v == 0 {
 		return 64

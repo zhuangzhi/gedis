@@ -20,26 +20,29 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-// Dict 是基于 Arena 的开放寻址哈希表，使用 FNV-1a 哈希函数。
-// 键值对以整数偏移量形式存储在 Arena 中，避免 GC 压力。
-// 当负载因子超过 75% 时自动触发 rehash 扩容。
 package gedis
 
+// Dict 哈希表。使用 FNV-1a 哈希 + 线性探测，所有数据存储在 Arena 中。
+// 负载因子超过 75% 时自动 rehash（扩为 2 倍）。
+//
+// 每个槽位 8 字节:
+//
+//	[ keyOff (4B) | valOff (4B) ]
 const (
-	dictSlotSize   = 8  // 每槽 8 字节（4 字节 key + 4 字节 value）
-	dictInitSize   = 16 // 初始哈希表大小
-	dictLoadFactor = 75 // 负载因子百分比阈值
+	dictSlotSize   = 8  // 每个槽位的字节数
+	dictInitSize   = 16 // 初始槽位数
+	dictLoadFactor = 75 // 负载因子（百分比）
 )
 
-// Dict 哈希表结构体
+// Dict 使用 Arena 存储的哈希表
 type Dict struct {
-	arena *Arena // Arena 内存分配器引用
-	table int    // 哈希表在 Arena 中的偏移
-	size  int    // 哈希表槽位数
+	arena *Arena // 关联的 Arena
+	table int    // 槽位数组在 Arena 中的偏移
+	size  int    // 槽位总数
 	used  int    // 已使用槽位数
 }
 
-// NewDict 创建并初始化一个新的 Dict。
+// NewDict 在给定 Arena 中创建一个新的 Dict。
 func NewDict(arena *Arena) *Dict {
 	tableOff := arena.Alloc(dictInitSize * dictSlotSize)
 	d := &Dict{
@@ -54,14 +57,15 @@ func NewDict(arena *Arena) *Dict {
 	return d
 }
 
-// StoreMeta 将 Dict 的元数据序列化到 Arena 指定偏移位置。
+// StoreMeta 将 Dict 元数据序列化到 Arena 指定偏移。
+// 格式: [table(4B) | size(4B) | used(4B)]
 func (d *Dict) StoreMeta(off int) {
 	d.arena.WriteUint32(off, uint32(d.table))
 	d.arena.WriteUint32(off+4, uint32(d.size))
 	d.arena.WriteUint32(off+8, uint32(d.used))
 }
 
-// LoadDictMeta 从 Arena 指定偏移位置反序列化 Dict 元数据。
+// LoadDictMeta 从 Arena 中加载已持久化的 Dict 元数据。
 func LoadDictMeta(arena *Arena, off int) *Dict {
 	table := int(arena.ReadUint32(off))
 	size := int(arena.ReadUint32(off + 4))
@@ -74,13 +78,9 @@ func LoadDictMeta(arena *Arena, off int) *Dict {
 	}
 }
 
-func (d *Dict) slotKeyOff(idx int) int {
-	return d.table + idx*dictSlotSize
-}
-
-func (d *Dict) slotValOff(idx int) int {
-	return d.table + idx*dictSlotSize + 4
-}
+// 槽位访问器：每个槽位 = keyOff(4B) + valOff(4B)
+func (d *Dict) slotKeyOff(idx int) int { return d.table + idx*dictSlotSize }
+func (d *Dict) slotValOff(idx int) int { return d.table + idx*dictSlotSize + 4 }
 
 func (d *Dict) setSlot(idx int, keyOff, valOff int) {
 	d.arena.WriteUint32(d.slotKeyOff(idx), uint32(keyOff))
@@ -93,10 +93,12 @@ func (d *Dict) getSlot(idx int) (keyOff, valOff int) {
 	return
 }
 
+// hashKey 对 key 进行 FNV-1a 哈希。
 func (d *Dict) hashKey(key []byte) uint32 {
 	return fnv32(key)
 }
 
+// keyEquals 判断槽位 key 是否与给定 key 相等（逐字节比较）。
 func (d *Dict) keyEquals(keyOff int, key []byte) bool {
 	if keyOff == 0 {
 		return false
@@ -114,7 +116,7 @@ func (d *Dict) keyEquals(keyOff int, key []byte) bool {
 	return true
 }
 
-// Set 插入或更新键值对。若负载因子超过阈值则先触发 rehash。
+// Set 插入或更新键值对。若 key 已存在则更新 valOff。
 func (d *Dict) Set(key []byte, valOff int) {
 	if d.used*100 >= d.size*dictLoadFactor {
 		d.rehash()
@@ -139,7 +141,7 @@ func (d *Dict) Set(key []byte, valOff int) {
 	}
 }
 
-// Get 根据键查找值，返回值的偏移量和是否存在。
+// Get 根据 key 查找对应的 valOff。返回值 ok 指示是否找到。
 func (d *Dict) Get(key []byte) (valOff int, ok bool) {
 	h := d.hashKey(key)
 	idx := int(h % uint32(d.size))
@@ -156,7 +158,7 @@ func (d *Dict) Get(key []byte) (valOff int, ok bool) {
 	}
 }
 
-// Del 删除指定键。返回是否成功删除。
+// Del 删除指定 key。返回是否成功删除。
 func (d *Dict) Del(key []byte) bool {
 	h := d.hashKey(key)
 	idx := int(h % uint32(d.size))
@@ -175,7 +177,7 @@ func (d *Dict) Del(key []byte) bool {
 	}
 }
 
-// rehash 将哈希表扩容为原来的两倍，并重新哈希所有已有键值对。
+// rehash 将哈希表扩容为 2 倍，重新哈希所有 key。
 func (d *Dict) rehash() {
 	newSize := d.size * 2
 	newTableOff := d.arena.Alloc(newSize * dictSlotSize)
@@ -203,7 +205,7 @@ func (d *Dict) rehash() {
 	}
 }
 
-// fnv32 对字节切片计算 FNV-1a 32 位哈希值。
+// fnv32 FNV-1a 哈希函数。
 func fnv32(data []byte) uint32 {
 	var h uint32 = 2166136261
 	for _, b := range data {
@@ -213,7 +215,7 @@ func fnv32(data []byte) uint32 {
 	return h
 }
 
-// fnv32U16 对 uint16 值计算 FNV-1a 32 位哈希值。
+// fnv32U16 零分配版 FNV-1a 哈希 for uint16。
 func fnv32U16(v uint16) uint32 {
 	h := uint32(2166136261)
 	h ^= uint32(byte(v))
@@ -223,7 +225,7 @@ func fnv32U16(v uint16) uint32 {
 	return h
 }
 
-// fnv32Byte 对单字节计算 FNV-1a 32 位哈希值。
+// fnv32Byte 零分配版 FNV-1a 哈希 for byte。
 func fnv32Byte(b byte) uint32 {
 	h := uint32(2166136261)
 	h ^= uint32(b)

@@ -19,14 +19,24 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
+//
+// String 命令实现: SET, GET, APPEND, GETRANGE, SETRANGE, STRLEN, INCRBY, INCRBYFLOAT.
 
 package gedis
 
-import (
-	"strconv"
-)
+import "strconv"
 
-func (db *RedisDB) Set(key string, value *PooledBuffer) {
+// Set 设置 key 的值为 value。
+// 对外友好 API，入参使用 []byte，方便 goja 调用。
+func (db *RedisDB) Set(key string, value []byte) {
+	pb := BufFromBytes(value)
+	db.SetBuffer(key, pb)
+	pb.Close()
+}
+
+// SetBuffer 设置 key 的值，入参使用 *PooledBuffer 避免堆分配。
+// 调用方通过 Buf(s) 获取，传入后应立即 pb.Close() 归还池。
+func (db *RedisDB) SetBuffer(key string, value *PooledBuffer) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -36,6 +46,7 @@ func (db *RedisDB) Set(key string, value *PooledBuffer) {
 	db.dict.Set(keyBytes, headOff)
 }
 
+// Get 获取 key 的值。返回 *PooledBuffer，调用方用完后必须 pb.Close()。
 func (db *RedisDB) Get(key string) (*PooledBuffer, bool) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -57,7 +68,7 @@ func (db *RedisDB) Get(key string) (*PooledBuffer, bool) {
 		val := int64(db.arena.ReadUint64(objHeaderDataOffset(headOff)))
 		s := strconv.FormatInt(val, 10)
 		pb := NewBuf(len(s))
-		pb.WriteString(s)
+		pb.buf.WriteString(s)
 		return pb, true
 	}
 
@@ -67,16 +78,26 @@ func (db *RedisDB) Get(key string) (*PooledBuffer, bool) {
 
 	size := db.arena.SizeAt(dataOff)
 	pb := NewBuf(size)
-	pb.buf.Write(db.arena.GetSlice(dataOff, size))
+	pb.buf.Write(db.arena.ReadBytes(dataOff, size))
 	return pb, true
 }
 
-func (db *RedisDB) Append(key string, value *PooledBuffer) int {
+// Append 在已有 key 值末尾追加 value。对外友好 API，入参 []byte。
+func (db *RedisDB) Append(key string, value []byte) int {
+	pb := BufFromBytes(value)
+	result := db.AppendBuffer(key, pb)
+	pb.Close()
+	return result
+}
+
+// AppendBuffer 入参使用 *PooledBuffer 避免堆分配。
+func (db *RedisDB) AppendBuffer(key string, value *PooledBuffer) int {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
 	keyBytes := []byte(key)
 	headOff, ok := db.dict.Get(keyBytes)
+
 	valBytes := value.Bytes()
 
 	if !ok {
@@ -117,17 +138,36 @@ func (db *RedisDB) Append(key string, value *PooledBuffer) int {
 	return len(newData)
 }
 
+// GetRange 返回 key 值的子字符串 [start, end]。返回 *PooledBuffer。
 func (db *RedisDB) GetRange(key string, start, end int) (*PooledBuffer, bool) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
-	pb, ok := db.Get(key)
+	headOff, ok := db.dict.Get([]byte(key))
 	if !ok {
 		return nil, false
 	}
-	defer pb.Close()
 
-	size := pb.Len()
+	typ := db.ObjectType(headOff)
+	if typ != ObjString && typ != ObjBitmap {
+		return nil, false
+	}
+
+	enc := db.ObjectEncoding(headOff)
+	dataOff := db.ObjectDataOffset(headOff)
+
+	var data []byte
+	if enc == ObjEncodingInt {
+		val := int64(db.arena.ReadUint64(objHeaderDataOffset(headOff)))
+		data = []byte(strconv.FormatInt(val, 10))
+	} else if dataOff != 0 {
+		size := db.arena.SizeAt(dataOff)
+		data = db.arena.ReadBytes(dataOff, size)
+	} else {
+		return nil, false
+	}
+
+	size := len(data)
 	if start < 0 {
 		start = size + start
 	}
@@ -140,21 +180,31 @@ func (db *RedisDB) GetRange(key string, start, end int) (*PooledBuffer, bool) {
 	if end >= size {
 		end = size - 1
 	}
-	if start > end {
+	if start > end || start >= size {
 		return nil, false
 	}
 
-	out := NewBuf(end - start + 1)
-	out.buf.Write(pb.Bytes()[start : end+1])
-	return out, true
+	pb := NewBuf(end - start + 1)
+	pb.buf.Write(data[start : end+1])
+	return pb, true
 }
 
-func (db *RedisDB) SetRange(key string, offset int, value *PooledBuffer) int {
+// SetRange 覆盖 key 值从 offset 开始的部分。对外友好 API，入参 []byte。
+func (db *RedisDB) SetRange(key string, offset int, value []byte) int {
+	pb := BufFromBytes(value)
+	result := db.SetRangeBuffer(key, offset, pb)
+	pb.Close()
+	return result
+}
+
+// SetRangeBuffer 入参使用 *PooledBuffer 避免堆分配。
+func (db *RedisDB) SetRangeBuffer(key string, offset int, value *PooledBuffer) int {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
 	keyBytes := []byte(key)
 	headOff, ok := db.dict.Get(keyBytes)
+
 	valBytes := value.Bytes()
 
 	if !ok {
@@ -195,6 +245,7 @@ func (db *RedisDB) SetRange(key string, offset int, value *PooledBuffer) int {
 	return newLen
 }
 
+// Strlen 返回 key 值的字节长度。
 func (db *RedisDB) Strlen(key string) int {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -217,6 +268,7 @@ func (db *RedisDB) Strlen(key string) int {
 	return db.arena.SizeAt(dataOff)
 }
 
+// IncrBy 将 key 的整数值增加 inc。若 key 不存在则设为 inc。
 func (db *RedisDB) IncrBy(key string, inc int64) (int64, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -248,7 +300,8 @@ func (db *RedisDB) IncrBy(key string, inc int64) (int64, error) {
 	}
 
 	size := db.arena.SizeAt(dataOff)
-	oldVal, err := strconv.ParseInt(string(db.arena.ReadBytes(dataOff, size)), 10, 64)
+	strVal := string(db.arena.ReadBytes(dataOff, size))
+	oldVal, err := strconv.ParseInt(strVal, 10, 64)
 	if err != nil {
 		return 0, err
 	}
@@ -261,6 +314,7 @@ func (db *RedisDB) IncrBy(key string, inc int64) (int64, error) {
 	return newVal, nil
 }
 
+// IncrByFloat 将 key 的浮点值增加 inc。
 func (db *RedisDB) IncrByFloat(key string, inc float64) (float64, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -269,12 +323,11 @@ func (db *RedisDB) IncrByFloat(key string, inc float64) (float64, error) {
 	headOff, ok := db.dict.Get(keyBytes)
 
 	if !ok {
-		newVal := inc
-		newStr := strconv.FormatFloat(newVal, 'f', -1, 64)
-		newOff := db.arena.AllocBytes([]byte(newStr))
-		headOff = db.NewObject(ObjString, ObjEncodingRaw, newOff)
+		newStr := strconv.FormatFloat(inc, 'f', -1, 64)
+		valOff := db.arena.AllocBytes([]byte(newStr))
+		headOff = db.NewObject(ObjString, ObjEncodingRaw, valOff)
 		db.dict.Set(keyBytes, headOff)
-		return newVal, nil
+		return inc, nil
 	}
 
 	enc := db.ObjectEncoding(headOff)

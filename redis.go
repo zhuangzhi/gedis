@@ -20,19 +20,19 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-// RedisDB 是 Gedis 内存数据库的主结构体，封装了 Arena 内存分配器、Dict 字典
-// 以及读写锁，所有数据操作都通过 RedisDB 进行。
 package gedis
 
 import "sync"
 
+// RedisDB 是嵌入式 Redis-like 内存数据库的主结构。
+// 所有数据存储在 Arena 中，通过 Dict 索引，sync.RWMutex 保证并发安全。
 type RedisDB struct {
 	arena *Arena
 	dict  *Dict
 	mu    sync.RWMutex
 }
 
-// New 创建一个新的 RedisDB 实例，初始化 Arena 和 Dict。
+// New 创建一个新的 RedisDB 实例。
 func New() *RedisDB {
 	arena := NewArena(0)
 	dict := NewDict(arena)
@@ -42,7 +42,7 @@ func New() *RedisDB {
 	}
 }
 
-// Del 删除指定键及其关联的数据。
+// Del 删除指定 key 及其关联的所有数据。
 func (db *RedisDB) Del(key string) bool {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -57,7 +57,7 @@ func (db *RedisDB) Del(key string) bool {
 	return db.dict.Del(keyBytes)
 }
 
-// Exists 检查指定键是否存在。
+// Exists 检查 key 是否存在。
 func (db *RedisDB) Exists(key string) bool {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -66,7 +66,7 @@ func (db *RedisDB) Exists(key string) bool {
 	return ok
 }
 
-// FlushAll 清空数据库中的所有数据。
+// FlushAll 清空所有数据，重置 Arena 和 Dict。
 func (db *RedisDB) FlushAll() {
 	db.mu.Lock()
 	defer db.mu.Unlock()

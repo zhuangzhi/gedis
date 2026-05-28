@@ -70,7 +70,7 @@ func (db *RedisDB) graphAddNode(graphName, nodeID string, labels []string, props
 	for _, label := range labels {
 		labelIdxKey := graphName + ":label:" + label
 		pb := Buf(nodeID)
-		db.SAdd(labelIdxKey, pb)
+		db.SAddBuffer(labelIdxKey, pb)
 		pb.Close()
 	}
 }
@@ -98,11 +98,11 @@ func (db *RedisDB) graphAddEdge(graphName, edgeID, edgeType, sourceID, targetID 
 	}
 
 	pb1 := Buf(edgeID)
-	db.ZAdd(outKey, 0, pb1)
+	db.ZAddBuffer(outKey, 0, pb1)
 	pb1.Close()
 
 	pb2 := Buf(edgeID)
-	db.ZAdd(inKey, 0, pb2)
+	db.ZAddBuffer(inKey, 0, pb2)
 	pb2.Close()
 }
 
@@ -231,10 +231,14 @@ func (db *RedisDB) getNodeIDsByLabel(graphName, label string) []string {
 	}
 	labelIdxKey := graphName + ":label:" + label
 	members := db.SMembers(labelIdxKey)
-	result := make([]string, len(members))
-	for i, m := range members {
-		result[i] = m.String()
+	if members == nil {
+		return nil
 	}
+	result := make([]string, members.Len())
+	for i := 0; i < members.Len(); i++ {
+		result[i] = string(members.Get(i))
+	}
+	members.Close()
 	return result
 }
 

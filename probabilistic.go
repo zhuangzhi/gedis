@@ -57,7 +57,16 @@ func (db *RedisDB) BFReserve(key string, errorRate float64, capacity int) {
 	db.dict.Set(keyBytes, headOff)
 }
 
-func (db *RedisDB) BFAdd(key string, item *PooledBuffer) bool {
+// BFAdd 向布隆过滤器中添加元素。对外友好 API，入参 []byte。
+func (db *RedisDB) BFAdd(key string, item []byte) bool {
+	pb := BufFromBytes(item)
+	result := db.BFAddBuffer(key, pb)
+	pb.Close()
+	return result
+}
+
+// BFAddBuffer 向布隆过滤器中添加元素，入参 *PooledBuffer 避免堆分配。
+func (db *RedisDB) BFAddBuffer(key string, item *PooledBuffer) bool {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -97,7 +106,16 @@ func (db *RedisDB) BFAdd(key string, item *PooledBuffer) bool {
 	return true
 }
 
-func (db *RedisDB) BFExists(key string, item *PooledBuffer) bool {
+// BFExists 判断元素是否可能存在于布隆过滤器中。对外友好 API，入参 []byte。
+func (db *RedisDB) BFExists(key string, item []byte) bool {
+	pb := BufFromBytes(item)
+	result := db.BFExistsBuffer(key, pb)
+	pb.Close()
+	return result
+}
+
+// BFExistsBuffer 判断元素是否可能存在于布隆过滤器中，入参 *PooledBuffer 避免堆分配。
+func (db *RedisDB) BFExistsBuffer(key string, item *PooledBuffer) bool {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -187,7 +205,16 @@ func (db *RedisDB) CFReserve(key string, capacity int) {
 	db.dict.Set(keyBytes, headOff)
 }
 
-func (db *RedisDB) CFAdd(key string, item *PooledBuffer) bool {
+// CFAdd 向布谷鸟过滤器中添加元素。对外友好 API，入参 []byte。
+func (db *RedisDB) CFAdd(key string, item []byte) bool {
+	pb := BufFromBytes(item)
+	result := db.CFAddBuffer(key, pb)
+	pb.Close()
+	return result
+}
+
+// CFAddBuffer 向布谷鸟过滤器中添加元素，入参 *PooledBuffer 避免堆分配。
+func (db *RedisDB) CFAddBuffer(key string, item *PooledBuffer) bool {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -233,7 +260,16 @@ func (db *RedisDB) CFAdd(key string, item *PooledBuffer) bool {
 	return false
 }
 
-func (db *RedisDB) CFDel(key string, item *PooledBuffer) bool {
+// CFDel 从布谷鸟过滤器中删除元素。对外友好 API，入参 []byte。
+func (db *RedisDB) CFDel(key string, item []byte) bool {
+	pb := BufFromBytes(item)
+	result := db.CFDelBuffer(key, pb)
+	pb.Close()
+	return result
+}
+
+// CFDelBuffer 从布谷鸟过滤器中删除元素，入参 *PooledBuffer 避免堆分配。
+func (db *RedisDB) CFDelBuffer(key string, item *PooledBuffer) bool {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -260,7 +296,16 @@ func (db *RedisDB) CFDel(key string, item *PooledBuffer) bool {
 	return false
 }
 
-func (db *RedisDB) CFExists(key string, item *PooledBuffer) bool {
+// CFExists 判断元素是否可能存在于布谷鸟过滤器中。对外友好 API，入参 []byte。
+func (db *RedisDB) CFExists(key string, item []byte) bool {
+	pb := BufFromBytes(item)
+	result := db.CFExistsBuffer(key, pb)
+	pb.Close()
+	return result
+}
+
+// CFExistsBuffer 判断元素是否可能存在于布谷鸟过滤器中，入参 *PooledBuffer 避免堆分配。
+func (db *RedisDB) CFExistsBuffer(key string, item *PooledBuffer) bool {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -363,7 +408,16 @@ func (db *RedisDB) CMSInitByDim(key string, width, depth int) {
 	db.dict.Set(keyBytes, headOff)
 }
 
-func (db *RedisDB) CMSIncrBy(key string, item *PooledBuffer, inc int) int {
+// CMSIncrBy 向 Count-Min Sketch 中增加计数值。对外友好 API，入参 []byte。
+func (db *RedisDB) CMSIncrBy(key string, item []byte, inc int) int {
+	pb := BufFromBytes(item)
+	result := db.CMSIncrByBuffer(key, pb, inc)
+	pb.Close()
+	return result
+}
+
+// CMSIncrByBuffer 向 Count-Min Sketch 中增加计数值，入参 *PooledBuffer 避免堆分配。
+func (db *RedisDB) CMSIncrByBuffer(key string, item *PooledBuffer, inc int) int {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -395,7 +449,17 @@ func (db *RedisDB) CMSIncrBy(key string, item *PooledBuffer, inc int) int {
 	return minVal
 }
 
-func (db *RedisDB) CMSQuery(key string, items ...*PooledBuffer) []int {
+// CMSQuery 查询 Count-Min Sketch 中多个元素的估计计数值。对外友好 API，入参 []byte。
+func (db *RedisDB) CMSQuery(key string, items ...[]byte) []int {
+	bufs := make([]*PooledBuffer, len(items))
+	for i, item := range items {
+		bufs[i] = BufFromBytes(item)
+	}
+	return db.CMSQueryBuffer(key, bufs...)
+}
+
+// CMSQueryBuffer 查询 Count-Min Sketch 中多个元素的估计计数值，入参 *PooledBuffer 避免堆分配。
+func (db *RedisDB) CMSQueryBuffer(key string, items ...*PooledBuffer) []int {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 

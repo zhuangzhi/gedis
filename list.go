@@ -33,7 +33,21 @@ func listValToBuf(val []byte) *PooledBuffer {
 	return pb
 }
 
-func (db *RedisDB) LPush(key string, values ...*PooledBuffer) int {
+// LPush 向列表头部插入元素。对外友好 API，入参 []byte。
+func (db *RedisDB) LPush(key string, values ...[]byte) int {
+	bufs := make([]*PooledBuffer, len(values))
+	for i, v := range values {
+		bufs[i] = BufFromBytes(v)
+	}
+	result := db.LPushBuffer(key, bufs...)
+	for _, b := range bufs {
+		b.Close()
+	}
+	return result
+}
+
+// LPushBuffer 向列表头部插入元素，入参 *PooledBuffer 避免堆分配。
+func (db *RedisDB) LPushBuffer(key string, values ...*PooledBuffer) int {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -65,7 +79,21 @@ func (db *RedisDB) LPush(key string, values ...*PooledBuffer) int {
 	return 0
 }
 
-func (db *RedisDB) RPush(key string, values ...*PooledBuffer) int {
+// RPush 向列表尾部插入元素。对外友好 API，入参 []byte。
+func (db *RedisDB) RPush(key string, values ...[]byte) int {
+	bufs := make([]*PooledBuffer, len(values))
+	for i, v := range values {
+		bufs[i] = BufFromBytes(v)
+	}
+	result := db.RPushBuffer(key, bufs...)
+	for _, b := range bufs {
+		b.Close()
+	}
+	return result
+}
+
+// RPushBuffer 向列表尾部插入元素，入参 *PooledBuffer 避免堆分配。
+func (db *RedisDB) RPushBuffer(key string, values ...*PooledBuffer) int {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -97,6 +125,7 @@ func (db *RedisDB) RPush(key string, values ...*PooledBuffer) int {
 	return 0
 }
 
+// LPop 移除并返回列表头部元素。返回 *PooledBuffer。
 func (db *RedisDB) LPop(key string) (*PooledBuffer, bool) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -130,6 +159,7 @@ func (db *RedisDB) LPop(key string) (*PooledBuffer, bool) {
 	return nil, false
 }
 
+// RPop 移除并返回列表尾部元素。返回 *PooledBuffer。
 func (db *RedisDB) RPop(key string) (*PooledBuffer, bool) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -163,6 +193,7 @@ func (db *RedisDB) RPop(key string) (*PooledBuffer, bool) {
 	return nil, false
 }
 
+// LIndex 获取列表中指定索引的元素。返回 *PooledBuffer。
 func (db *RedisDB) LIndex(key string, index int) (*PooledBuffer, bool) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -192,7 +223,8 @@ func (db *RedisDB) LIndex(key string, index int) (*PooledBuffer, bool) {
 	return nil, false
 }
 
-func (db *RedisDB) LRange(key string, start, stop int) []*PooledBuffer {
+// LRange 获取列表中指定范围的元素。返回 *ZSlices，遍历后须 zs.Close()。
+func (db *RedisDB) LRange(key string, start, stop int) *ZSlices {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -224,11 +256,12 @@ func (db *RedisDB) LRange(key string, start, stop int) []*PooledBuffer {
 			return nil
 		}
 
-		result := make([]*PooledBuffer, 0, stop-start+1)
+		result := NewZSlices()
 		for i := start; i <= stop; i++ {
 			val := ziplistGet(db.arena, zlOff, i)
-			result = append(result, listValToBuf(val))
+			result.Add(val)
 		}
+		result.Finish()
 		return result
 	}
 

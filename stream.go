@@ -57,6 +57,9 @@ func streamEntryFieldCount(entOff int) int { return entOff + 24 }
 func streamEntryData(entOff int) int       { return entOff + streamEntryBase }
 
 // XAdd 向流中添加一条新条目。自动生成或使用指定的 ID。
+// 对应 Redis: XADD key ID field value [field value ...]
+// 优化：入参使用 map[string]*PooledBuffer 替代 map[string][]byte，
+// 调用方通过 Buf(s) 构建后即可 Close。
 func (db *RedisDB) XAdd(key string, id string, fields map[string]*PooledBuffer) string {
 	db.mu.Lock()
 	defer db.mu.Unlock()

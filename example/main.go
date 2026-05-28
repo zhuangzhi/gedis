@@ -2,8 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
-	"strconv"
 
 	"gedis"
 )
@@ -13,13 +11,9 @@ func main() {
 
 	fmt.Println("=== Strings ===")
 	{
-		alice := gedis.Buf("Alice")
-		db.Set("user:1:name", alice)
-		alice.Close()
+	db.Set("user:1:name", []byte("Alice"))
 
-		score100 := gedis.Buf("100")
-		db.Set("user:1:score", score100)
-		score100.Close()
+	db.Set("user:1:score", []byte("100"))
 
 		val, _ := db.Get("user:1:name")
 		fmt.Printf("  GET user:1:name = %s\n", val.String())
@@ -30,9 +24,7 @@ func main() {
 		fmt.Printf("  INCRBY score +50 = %s\n", score.String())
 		score.Close()
 
-		smith := gedis.Buf(" Smith")
-		db.Append("user:1:name", smith)
-		smith.Close()
+	db.Append("user:1:name", []byte(" Smith"))
 		val, _ = db.Get("user:1:name")
 		fmt.Printf("  APPEND name = %s\n", val.String())
 		val.Close()
@@ -45,7 +37,7 @@ func main() {
 	fmt.Println("\n=== Lists ===")
 	{
 		db.LPush("queue",
-			gedis.Buf("first"), gedis.Buf("second"), gedis.Buf("third"),
+			[]byte("first"), []byte("second"), []byte("third"),
 		)
 		fmt.Printf("  LLEN = %d\n", db.LLen("queue"))
 
@@ -63,9 +55,9 @@ func main() {
 
 	fmt.Println("\n=== Hashes ===")
 	{
-		db.HSet("user:1", "name", gedis.Buf("Alice"))
-		db.HSet("user:1", "email", gedis.Buf("alice@example.com"))
-		db.HSet("user:1", "age", gedis.Buf("30"))
+		db.HSet("user:1", "name", []byte("Alice"))
+		db.HSet("user:1", "email", []byte("alice@example.com"))
+		db.HSet("user:1", "age", []byte("30"))
 
 		val, _ := db.HGet("user:1", "email")
 		fmt.Printf("  HGET email = %s\n", val.String())
@@ -79,32 +71,34 @@ func main() {
 		val.Close()
 
 		all := db.HGetAll("user:1")
-		for k, v := range all {
-			fmt.Printf("    %s: %s\n", k, v.String())
+		for i := 0; i < all.Len(); i += 2 {
+			fmt.Printf("    %s: %s\n", string(all.Get(i)), string(all.Get(i+1)))
 		}
+		all.Close()
 	}
 
 	fmt.Println("\n=== Sets ===")
 	{
-		db.SAdd("tags", gedis.Buf("go"), gedis.Buf("redis"), gedis.Buf("database"))
+		db.SAdd("tags", []byte("go"), []byte("redis"), []byte("database"))
 		fmt.Printf("  SCARD = %d\n", db.SCard("tags"))
-		fmt.Printf("  SISMEMBER go = %v\n", db.SIsMember("tags", gedis.Buf("go")))
+		fmt.Printf("  SISMEMBER go = %v\n", db.SIsMember("tags", []byte("go")))
 
-		db.SAdd("tags2", gedis.Buf("go"), gedis.Buf("python"), gedis.Buf("memory"))
+		db.SAdd("tags2", []byte("go"), []byte("python"), []byte("memory"))
 		inter := db.SInter("tags", "tags2")
-		fmt.Printf("  SINTER = %d members\n", len(inter))
-		for _, m := range inter {
-			fmt.Printf("    %s\n", m.String())
+		fmt.Printf("  SINTER = %d members\n", inter.Len())
+		for i := 0; i < inter.Len(); i++ {
+			fmt.Printf("    %s\n", string(inter.Get(i)))
 		}
+		inter.Close()
 	}
 
 	fmt.Println("\n=== Sorted Sets ===")
 	{
-		db.ZAdd("leaderboard", 1000, gedis.Buf("Alice"))
-		db.ZAdd("leaderboard", 850, gedis.Buf("Bob"))
-		db.ZAdd("leaderboard", 950, gedis.Buf("Charlie"))
+		db.ZAdd("leaderboard", 1000, []byte("Alice"))
+		db.ZAdd("leaderboard", 850, []byte("Bob"))
+		db.ZAdd("leaderboard", 950, []byte("Charlie"))
 
-		score, _ := db.ZScore("leaderboard", gedis.Buf("Alice"))
+		score, _ := db.ZScore("leaderboard", []byte("Alice"))
 		fmt.Printf("  ZSCORE Alice = %.0f\n", score)
 		fmt.Printf("  ZCARD = %d\n", db.ZCard("leaderboard"))
 
@@ -113,6 +107,7 @@ func main() {
 		for i := 0; i < members.Len(); i++ {
 			fmt.Printf("    %s\n", string(members.Get(i)))
 		}
+		members.Close()
 
 		fmt.Println("  ZRANGEITER (zero-alloc):")
 		db.ZRangeIter("leaderboard", 0, -1, func(member []byte) {
@@ -121,17 +116,18 @@ func main() {
 
 		fmt.Println("  ZRANGEWITHSCORES:")
 		names, scores := db.ZRangeWithScores("leaderboard", 0, -1)
-		for i, name := range names {
-			fmt.Printf("    %s: %.0f\n", name, scores[i])
+		for i := 0; i < names.Len(); i++ {
+			fmt.Printf("    %s: %.0f\n", string(names.Get(i)), scores[i])
 		}
+		names.Close()
 
-		db.ZRem("leaderboard", gedis.Buf("Bob"))
+		db.ZRem("leaderboard", []byte("Bob"))
 		fmt.Printf("  ZREM Bob -> ZCARD = %d\n", db.ZCard("leaderboard"))
 	}
 
 	fmt.Println("\n=== HyperLogLog ===")
 	{
-		db.PFAdd("visitors",
+		db.PFAddBuffer("visitors",
 			gedis.Buf("user1"), gedis.Buf("user2"), gedis.Buf("user3"),
 			gedis.Buf("user4"), gedis.Buf("user5"), gedis.Buf("user1"),
 		)
@@ -151,29 +147,29 @@ func main() {
 	fmt.Println("\n=== Probabilistic - Bloom Filter ===")
 	{
 		db.BFReserve("bf", 0.01, 100000)
-		db.BFAdd("bf", gedis.Buf("apple"))
-		db.BFAdd("bf", gedis.Buf("banana"))
-		db.BFAdd("bf", gedis.Buf("cherry"))
-		fmt.Printf("  BF.EXISTS apple = %v\n", db.BFExists("bf", gedis.Buf("apple")))
-		fmt.Printf("  BF.EXISTS grape = %v\n", db.BFExists("bf", gedis.Buf("grape")))
+		db.BFAdd("bf", []byte("apple"))
+		db.BFAdd("bf", []byte("banana"))
+		db.BFAdd("bf", []byte("cherry"))
+		fmt.Printf("  BF.EXISTS apple = %v\n", db.BFExists("bf", []byte("apple")))
+		fmt.Printf("  BF.EXISTS grape = %v\n", db.BFExists("bf", []byte("grape")))
 	}
 
 	fmt.Println("\n=== Probabilistic - Cuckoo Filter ===")
 	{
 		db.CFReserve("cf", 1000)
-		db.CFAdd("cf", gedis.Buf("go"))
-		db.CFAdd("cf", gedis.Buf("rust"))
-		fmt.Printf("  CF.EXISTS go = %v\n", db.CFExists("cf", gedis.Buf("go")))
-		db.CFDel("cf", gedis.Buf("go"))
-		fmt.Printf("  CF.DEL go -> CF.EXISTS go = %v\n", db.CFExists("cf", gedis.Buf("go")))
+		db.CFAdd("cf", []byte("go"))
+		db.CFAdd("cf", []byte("rust"))
+		fmt.Printf("  CF.EXISTS go = %v\n", db.CFExists("cf", []byte("go")))
+		db.CFDel("cf", []byte("go"))
+		fmt.Printf("  CF.DEL go -> CF.EXISTS go = %v\n", db.CFExists("cf", []byte("go")))
 	}
 
 	fmt.Println("\n=== Probabilistic - Count-Min Sketch ===")
 	{
 		db.CMSInitByDim("cms", 2000, 10)
-		db.CMSIncrBy("cms", gedis.Buf("item_a"), 3)
-		db.CMSIncrBy("cms", gedis.Buf("item_b"), 5)
-		qs := db.CMSQuery("cms", gedis.Buf("item_a"), gedis.Buf("item_b"), gedis.Buf("item_c"))
+		db.CMSIncrBy("cms", []byte("item_a"), 3)
+		db.CMSIncrBy("cms", []byte("item_b"), 5)
+		qs := db.CMSQuery("cms", []byte("item_a"), []byte("item_b"), []byte("item_c"))
 		fmt.Printf("  CMS.QUERY item_a = %d\n", qs[0])
 		fmt.Printf("  CMS.QUERY item_b = %d\n", qs[1])
 		fmt.Printf("  CMS.QUERY item_c = %d\n", qs[2])
@@ -225,7 +221,12 @@ func main() {
 		fmt.Printf("  GEODIST Beijing-Shanghai = %.0f km\n", dist)
 
 		nearby := db.GeoRadius("cities", 121.473, 31.230, 500, "km")
-		fmt.Printf("  GEORADIUS Shanghai 500km: %v\n", nearby)
+		fmt.Print("  GEORADIUS Shanghai 500km: ")
+		for i := 0; i < nearby.Len(); i++ {
+			fmt.Printf("%s ", string(nearby.Get(i)))
+		}
+		fmt.Println()
+		nearby.Close()
 	}
 
 	fmt.Println("\n=== Streams ===")
@@ -272,7 +273,12 @@ func main() {
 			"role": "user",
 		})
 		results := db.FTSearch("idx:users", "alice", 10)
-		fmt.Printf("  FT.SEARCH alice: %v\n", results)
+		fmt.Print("  FT.SEARCH alice: ")
+		for i := 0; i < results.Len(); i++ {
+			fmt.Printf("%s ", string(results.Get(i)))
+		}
+		fmt.Println()
+		results.Close()
 	}
 
 	fmt.Println("\n=== Graph ===")
@@ -296,7 +302,5 @@ func main() {
 	}
 
 	fmt.Println()
-
-	_ = strconv.Itoa
-	os.Exit(0)
 }
+

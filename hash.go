@@ -24,7 +24,16 @@ package gedis
 
 import "strconv"
 
-func (db *RedisDB) HSet(key string, field string, value *PooledBuffer) int {
+// HSet 设置哈希表中的字段值。对外友好 API，value 入参 []byte。
+func (db *RedisDB) HSet(key string, field string, value []byte) int {
+	pb := BufFromBytes(value)
+	result := db.HSetBuffer(key, field, pb)
+	pb.Close()
+	return result
+}
+
+// HSetBuffer 设置哈希表中的字段值，入参 *PooledBuffer 避免堆分配。
+func (db *RedisDB) HSetBuffer(key string, field string, value *PooledBuffer) int {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -46,14 +55,17 @@ func (db *RedisDB) HSet(key string, field string, value *PooledBuffer) int {
 	if enc == ObjEncodingZiplist {
 		zlOff := dataOff
 		n := ziplistLen(db.arena, zlOff)
+		pos := zlOff + ziplistHeaderSize
 		for i := 0; i < n; i += 2 {
-			f := ziplistGet(db.arena, zlOff, i)
+			f := ziplistReadEntryData(db.arena, pos)
 			if string(f) == field {
 				zlOff = ziplistDelete(db.arena, zlOff, i+1)
 				zlOff = ziplistInsertAt(db.arena, zlOff, i+1, value.Bytes())
 				db.ObjectSetDataOffset(headOff, zlOff)
 				return 0
 			}
+			pos += ziplistEntryTotalSize(db.arena, pos)
+			pos += ziplistEntryTotalSize(db.arena, pos)
 		}
 
 		zlOff = ziplistInsert(db.arena, zlOff, []byte(field), false)
@@ -65,6 +77,7 @@ func (db *RedisDB) HSet(key string, field string, value *PooledBuffer) int {
 	return 0
 }
 
+// HGet 获取哈希表中指定字段的值。返回 *PooledBuffer。
 func (db *RedisDB) HGet(key string, field string) (*PooledBuffer, bool) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -139,7 +152,9 @@ func (db *RedisDB) HDel(key string, fields ...string) int {
 	return 0
 }
 
-func (db *RedisDB) HGetAll(key string) map[string]*PooledBuffer {
+// HGetAll 获取哈希表中的所有字段和值。返回 *ZSlices，
+// 格式为 [field1, value1, field2, value2, ...]，遍历后须 zs.Close()。
+func (db *RedisDB) HGetAll(key string) *ZSlices {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -155,14 +170,12 @@ func (db *RedisDB) HGetAll(key string) map[string]*PooledBuffer {
 	if enc == ObjEncodingZiplist {
 		zlOff := dataOff
 		n := ziplistLen(db.arena, zlOff)
-		result := make(map[string]*PooledBuffer, n/2)
-		for i := 0; i < n; i += 2 {
-			f := ziplistGet(db.arena, zlOff, i)
-			v := ziplistGet(db.arena, zlOff, i+1)
-			pb := NewBuf(len(v))
-			pb.buf.Write(v)
-			result[string(f)] = pb
+		result := NewZSlices()
+		for i := 0; i < n; i++ {
+			v := ziplistGet(db.arena, zlOff, i)
+			result.Add(v)
 		}
+		result.Finish()
 		return result
 	}
 

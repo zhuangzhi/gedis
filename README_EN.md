@@ -3,8 +3,8 @@
 [中文](./README.md)
 
 [![Go Version](https://img.shields.io/badge/Go-1.21%2B-blue)](https://go.dev/)
-[![Test](https://img.shields.io/badge/tests-42%20passed-brightgreen)](./redis_test.go)
-[![Benchmark](https://img.shields.io/badge/benchmarks-42-f1c40f)](./redis_bench_test.go)
+[![Test](https://img.shields.io/badge/tests-59%20passed-brightgreen)](./redis_test.go)
+[![Benchmark](https://img.shields.io/badge/benchmarks-70-f1c40f)](./redis_bench_test.go)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 
 gedis is an embedded Redis-like in-memory database written in Go. The core design goal is **zero GC pressure** — all persistent data lives in a single `[]byte` Arena, using integer offsets instead of Go pointers to prevent the GC from scanning structured data.
@@ -71,6 +71,13 @@ Each stored value is prefixed with a 16-byte object header:
 ## API Reference
 
 > See [API.md](./API.md) for detailed API documentation.
+
+### Zero-Allocation Optimization
+
+All public APIs use two zero-allocation types as replacements for native Go types:
+
+- **`*PooledBuffer`** replaces `[]byte` — allocated from a 6-tier object pool (1K/4K/16K/64K/256K/1M), must call `Close()` to return
+- **`*ZSlices`** replaces `[]string` — elements stored compactly in a PooledBuffer, `Get(i)` returns a zero-copy `[]byte` view, must call `Close()` to return
 
 ### Keys
 
@@ -140,7 +147,7 @@ func (db *RedisDB) ZRem(key string, member *PooledBuffer) bool
 func (db *RedisDB) ZScore(key string, member *PooledBuffer) (float64, bool)
 func (db *RedisDB) ZRange(key string, start, stop int) ZSlices
 func (db *RedisDB) ZRangeIter(key string, start, stop int, fn func(member []byte))
-func (db *RedisDB) ZRangeWithScores(key string, start, stop int) ([]string, []float64)
+func (db *RedisDB) ZRangeWithScores(key string, start, stop int) (*ZSlices, []float64)
 func (db *RedisDB) ZRangeByScore(key string, min, max float64) []*PooledBuffer
 func (db *RedisDB) ZRemRangeByScore(key string, min, max float64) int
 func (db *RedisDB) ZCard(key string) int
@@ -159,7 +166,8 @@ func (db *RedisDB) BitField(key string, args ...*PooledBuffer) []int64
 ### HyperLogLog
 
 ```go
-func (db *RedisDB) PFAdd(key string, elements ...*PooledBuffer) int
+func (db *RedisDB) PFAdd(key string, elements ...[]byte) int
+func (db *RedisDB) PFAddBuffer(key string, elements ...*PooledBuffer) int
 func (db *RedisDB) PFCount(keys ...string) int64
 func (db *RedisDB) PFMerge(dest string, sources ...string)
 ```
@@ -169,8 +177,8 @@ func (db *RedisDB) PFMerge(dest string, sources ...string)
 ```go
 func (db *RedisDB) GeoAdd(key string, lon, lat float64, member string) int
 func (db *RedisDB) GeoDist(key, member1, member2, unit string) float64
-func (db *RedisDB) GeoRadius(key string, lon, lat, radius float64, unit string) []string
-func (db *RedisDB) GeoRadiusByMember(key, member string, radius float64, unit string) []string
+func (db *RedisDB) GeoRadius(key string, lon, lat, radius float64, unit string) *ZSlices
+func (db *RedisDB) GeoRadiusByMember(key, member string, radius float64, unit string) *ZSlices
 func (db *RedisDB) GeoPos(key string, members ...string) [][2]float64
 ```
 
@@ -233,7 +241,7 @@ func (db *RedisDB) JsonObjLen(key string, path string) (int, error)
 ```go
 func (db *RedisDB) FTCreate(index string, schema map[string]string)
 func (db *RedisDB) FTAdd(index string, docID string, fields map[string]string)
-func (db *RedisDB) FTSearch(index string, query string, limit int) []string
+func (db *RedisDB) FTSearch(index string, query string, limit int) *ZSlices
 ```
 
 ### Graph
@@ -287,6 +295,7 @@ func main() {
     for i := 0; i < members.Len(); i++ {
         fmt.Println(string(members.Get(i)))
     }
+    members.Close()
     // Output: a, b
 
     // Probabilistic - Bloom Filter
@@ -385,30 +394,33 @@ go test -bench=. -benchtime=300ms -benchmem -count=1 -run NONE .
 
 ```
 gedis/
-├── arena.go          # Arena memory allocator
-├── object.go         # Object header management
-├── dict.go           # Hash table (FNV-1a + linear probing)
-├── redis.go          # RedisDB main structure
-├── string.go         # String commands
-├── list.go           # List commands
-├── hash.go           # Hash commands
-├── set.go            # Set commands
-├── zset.go           # Sorted Set commands
-├── ziplist.go        # Ziplist internal structure
-├── skip_list.go      # Skiplist internal structure
-├── bitmap.go         # Bitmap / BitField commands
-├── hyperloglog.go    # HyperLogLog commands
-├── geo.go            # Geo commands
-├── stream.go         # Stream commands
-├── timeseries.go     # TimeSeries commands
-├── probabilistic.go  # Bloom/Cuckoo/CMS/TopK commands
-├── json.go           # JSON commands
-├── search.go         # Search commands
-├── graph.go          # Graph commands
-├── cell.go           # Rate Limiter commands
-├── redis_test.go     # Unit tests (42 tests)
-├── redis_bench_test.go # Benchmarks (42 benchmarks)
-├── API.md            # Detailed API documentation
+├── arena.go             # Arena memory allocator
+├── poolbuffer.go        # PooledBuffer tiered object pool
+├── zslices.go           # ZSlices zero-allocation string slice
+├── object.go            # Object header management
+├── dict.go              # Hash table (FNV-1a + linear probing)
+├── redis.go             # RedisDB main structure
+├── string.go            # String commands
+├── list.go              # List commands
+├── hash.go              # Hash commands
+├── set.go               # Set commands
+├── zset.go              # Sorted Set commands
+├── ziplist.go           # Ziplist internal structure
+├── skip_list.go         # Skiplist internal structure
+├── bitmap.go            # Bitmap / BitField commands
+├── hyperloglog.go       # HyperLogLog commands
+├── geo.go               # Geo commands
+├── stream.go            # Stream commands
+├── timeseries.go        # TimeSeries commands
+├── probabilistic.go     # Bloom/Cuckoo/CMS/TopK commands
+├── json.go              # JSON commands
+├── search.go            # Search commands
+├── graph.go             # Graph commands
+├── cell.go              # Rate Limiter commands
+├── redis_test.go        # Unit tests (59 tests)
+├── redis_bench_test.go  # Benchmarks (70 benchmarks)
+├── example/             # Usage examples
+├── API.md               # Detailed API documentation
 ```
 
 ## Testing

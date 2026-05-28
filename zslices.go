@@ -2,9 +2,22 @@ package gedis
 
 import "encoding/binary"
 
-// ZSlices 使用 PooledBuffer 存储元素，格式：[4字节count][len1][data1][len2][data2]...
+// ZSlices 是一个零分配的字符串切片，使用 PooledBuffer 紧凑存储元素。
+// 格式：[4字节count][len1][data1][len2][data2]...
+// 与 []string 的区别：
+//   - 内存紧凑、一次分配
+//   - Get(i) 返回 []byte，直接引用内部缓冲区（零拷贝）
+//   - 调用方遍历后必须调用 Close() 归还底层 PooledBuffer
+//
+// 使用示例：
+//
+//	zs := db.ZRange("key", 0, -1)
+//	for i := 0; i < zs.Len(); i++ {
+//	    fmt.Println(string(zs.Get(i)))
+//	}
+//	zs.Close()
 type ZSlices struct {
-	buf *PooledBuffer // 内部缓冲区，不可直接暴露
+	buf *PooledBuffer
 }
 
 // NewZSlices 创建一个新的空 ZSlices，从池中获取缓冲区
@@ -16,14 +29,17 @@ func NewZSlices() *ZSlices {
 	return &ZSlices{buf: buf}
 }
 
-// Add 添加一个成员
+// Add 添加一个成员（字节形式）
 func (zs *ZSlices) Add(data []byte) {
-	// 写入长度（4字节小端）
 	lenBuf := make([]byte, 4)
 	binary.LittleEndian.PutUint32(lenBuf, uint32(len(data)))
 	zs.buf.Write(lenBuf)
-	// 写入数据
 	zs.buf.Write(data)
+}
+
+// AddString 添加一个字符串成员
+func (zs *ZSlices) AddString(s string) {
+	zs.Add([]byte(s))
 }
 
 // Len 返回元素个数

@@ -20,52 +20,46 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-// Ziplist 是一个紧凑的双向链表数据结构，所有条目连续存储在 Arena 中。
-// 每个条目由前驱长度（prevlen）、编码和数据组成，以 0xFF 结束标记。
 package gedis
 
 import "encoding/binary"
 
+// Ziplist 是一个双端紧凑列表结构，用于 List、Hash、小 ZSet。
+// 格式:
+//
+//	+--------+--------+-------+--------+--------+
+//	| zlbytes| zltail | zllen | entry1 | ...    | 0xFF |
+//	+--------+--------+-------+--------+--------+
+//	  4B       4B       2B       variable      1B
+//
+// 每个 entry: [prevLen(var)] [encoding(var)] [data(var)]
 const (
-	ziplistHeaderSize = 10
+	ziplistHeaderSize = 10 // zlbytes(4) + zltail(4) + zllen(2)
 	ziplistEndByte    = 0xFF
-	ziplistMaxPrevLen = 254
+	ziplistMaxPrevLen = 254 // 超过此值 prevLen 使用 5 字节编码
 )
 
+// ziplistNew 创建一个空 ziplist。
 func ziplistNew(arena *Arena) int {
-	size := ziplistHeaderSize + 1
+	size := ziplistHeaderSize + 1 // +1 for end byte
 	off := arena.Alloc(size)
-	arena.WriteUint32(off, uint32(size))
-	arena.WriteUint32(off+4, uint32(ziplistHeaderSize))
-	arena.WriteUint16(off+8, 0)
+	arena.WriteUint32(off, uint32(size))          // zlbytes
+	arena.WriteUint32(off+4, uint32(ziplistHeaderSize)) // zltail
+	arena.WriteUint16(off+8, 0)                  // zllen
 	arena.WriteByte(off+ziplistHeaderSize, ziplistEndByte)
 	return off
 }
 
-func ziplistTotalBytes(arena *Arena, zlOff int) int {
-	return int(arena.ReadUint32(zlOff))
-}
+// === Ziplist header 访问器 ===
 
-func ziplistSetTotalBytes(arena *Arena, zlOff int, v int) {
-	arena.WriteUint32(zlOff, uint32(v))
-}
+func ziplistTotalBytes(arena *Arena, zlOff int) int    { return int(arena.ReadUint32(zlOff)) }
+func ziplistSetTotalBytes(arena *Arena, zlOff int, v int) { arena.WriteUint32(zlOff, uint32(v)) }
+func ziplistTailOffset(arena *Arena, zlOff int) int    { return int(arena.ReadUint32(zlOff + 4)) }
+func ziplistSetTailOffset(arena *Arena, zlOff int, v int)  { arena.WriteUint32(zlOff+4, uint32(v)) }
+func ziplistNumEntries(arena *Arena, zlOff int) int    { return int(arena.ReadUint16(zlOff + 8)) }
+func ziplistSetNumEntries(arena *Arena, zlOff int, v int)  { arena.WriteUint16(zlOff+8, uint16(v)) }
 
-func ziplistTailOffset(arena *Arena, zlOff int) int {
-	return int(arena.ReadUint32(zlOff + 4))
-}
-
-func ziplistSetTailOffset(arena *Arena, zlOff int, v int) {
-	arena.WriteUint32(zlOff+4, uint32(v))
-}
-
-func ziplistNumEntries(arena *Arena, zlOff int) int {
-	return int(arena.ReadUint16(zlOff + 8))
-}
-
-func ziplistSetNumEntries(arena *Arena, zlOff int, v int) {
-	arena.WriteUint16(zlOff+8, uint16(v))
-}
-
+// ziplistResize 调整 ziplist 大小。会将数据迁移到 Arena 新位置。
 func ziplistResize(arena *Arena, zlOff int, newSize int) int {
 	oldSize := ziplistTotalBytes(arena, zlOff)
 	data := arena.ReadBytes(zlOff, oldSize)
@@ -79,6 +73,10 @@ func ziplistResize(arena *Arena, zlOff int, newSize int) int {
 	return newOff
 }
 
+// === Entry 编码/解码 ===
+
+// ziplistEntryPrevLen 读取 entry 的前驱长度及 prevLen 字段自身占用字节数。
+// prevLen < 254: 1 字节; prevLen >= 254: 5 字节 (0xFE + 4B LE)。
 func ziplistEntryPrevLen(arena *Arena, entryOff int) (prevLen int, prevLenSize int) {
 	b := arena.ReadByte(entryOff)
 	if b < ziplistMaxPrevLen {
@@ -87,6 +85,7 @@ func ziplistEntryPrevLen(arena *Arena, entryOff int) (prevLen int, prevLenSize i
 	return int(binary.LittleEndian.Uint32(arena.GetSlice(entryOff+1, 4))), 5
 }
 
+// ziplistWritePrevLen 在 entry 起始位置写入前驱长度，返回写入的字节数。
 func ziplistWritePrevLen(arena *Arena, entryOff int, prevLen int) int {
 	if prevLen < ziplistMaxPrevLen {
 		arena.WriteByte(entryOff, byte(prevLen))
@@ -97,6 +96,18 @@ func ziplistWritePrevLen(arena *Arena, entryOff int, prevLen int) int {
 	return 5
 }
 
+// ziplistEntryEncoding 解析 entry 的编码字节。返回:
+//
+//	isString - true 为字符串，false 为整数
+//	length   - 字符串长度（仅 isString=true 时有效）
+//	encSize  - encoding 字段占用的字节数
+//
+// 编码规则:
+//
+//	00xxxxxx           → 0-63 字节字符串
+//	01xxxxxx <len-8>   → 64-16383 字节字符串
+//	10______ <len-32>  → >=16384 字节字符串 (大端序)
+//	11xx____           → 整数编码
 func ziplistEntryEncoding(arena *Arena, entryOff int) (isString bool, length int, encSize int) {
 	b := arena.ReadByte(entryOff)
 	if b <= 0x3F {
@@ -123,6 +134,7 @@ func ziplistEntryEncoding(arena *Arena, entryOff int) (isString bool, length int
 	return true, int(b), 1
 }
 
+// ziplistWriteEntry 在 entryOff 写入一个字符串 entry，返回总字节数。
 func ziplistWriteEntry(arena *Arena, entryOff int, prevLen int, data []byte) int {
 	pos := entryOff
 	pos += ziplistWritePrevLen(arena, pos, prevLen)
@@ -144,6 +156,7 @@ func ziplistWriteEntry(arena *Arena, entryOff int, prevLen int, data []byte) int
 	return pos - entryOff
 }
 
+// ziplistWriteEntryInt 写入一个整数 entry，返回总字节数。
 func ziplistWriteEntryInt(arena *Arena, entryOff int, prevLen int, val int64) int {
 	pos := entryOff
 	pos += ziplistWritePrevLen(arena, pos, prevLen)
@@ -171,6 +184,7 @@ func ziplistWriteEntryInt(arena *Arena, entryOff int, prevLen int, val int64) in
 	return pos - entryOff
 }
 
+// ziplistReadEntryInt 从 entry 读取整数值。返回值和 encoding 的字节数。
 func ziplistReadEntryInt(arena *Arena, entryOff int, prevLenSize int) (int64, int) {
 	b := arena.ReadByte(entryOff + prevLenSize)
 	if b >= 0xF1 && b <= 0xFD {
@@ -189,6 +203,7 @@ func ziplistReadEntryInt(arena *Arena, entryOff int, prevLenSize int) (int64, in
 	return 0, 0
 }
 
+// ziplistReadEntryData 读取 entry 的 payload 数据（会分配新 []byte）。
 func ziplistReadEntryData(arena *Arena, entryOff int) []byte {
 	_, prevLenSize := ziplistEntryPrevLen(arena, entryOff)
 	isStr, length, encSize := ziplistEntryEncoding(arena, entryOff+prevLenSize)
@@ -201,6 +216,8 @@ func ziplistReadEntryData(arena *Arena, entryOff int) []byte {
 	return buf
 }
 
+// ziplistEntryDataEquals 零分配比较 entry 数据与给定字节切片是否相等。
+// 直接在 Arena 的 []byte 上逐字节比较，不分配副本。
 func ziplistEntryDataEquals(arena *Arena, entryOff int, data []byte) bool {
 	_, prevLenSize := ziplistEntryPrevLen(arena, entryOff)
 	isStr, length, encSize := ziplistEntryEncoding(arena, entryOff+prevLenSize)
@@ -220,12 +237,12 @@ func ziplistEntryDataEquals(arena *Arena, entryOff int, data []byte) bool {
 	return true
 }
 
+// ziplistEntrySize 计算写入给定前驱长度和数据需要的字节数。
 func ziplistEntrySize(prevLen int, data []byte) int {
 	plSize := 1
 	if prevLen >= ziplistMaxPrevLen {
 		plSize = 5
 	}
-
 	encSize := 1
 	if len(data) > 0x3F {
 		encSize = 2
@@ -236,12 +253,14 @@ func ziplistEntrySize(prevLen int, data []byte) int {
 	return plSize + encSize + len(data)
 }
 
+// ziplistEntryTotalSize 返回 entry 总字节数（prevLen + encoding + data）。
 func ziplistEntryTotalSize(arena *Arena, entryOff int) int {
 	_, plSize := ziplistEntryPrevLen(arena, entryOff)
 	_, length, encSize := ziplistEntryEncoding(arena, entryOff+plSize)
 	return plSize + encSize + length
 }
 
+// ziplistFind 在 ziplist 中查找指定数据，返回索引，未找到返回 -1。
 func ziplistFind(arena *Arena, zlOff int, data []byte) int {
 	if zlOff == 0 {
 		return -1
@@ -261,6 +280,7 @@ func ziplistFind(arena *Arena, zlOff int, data []byte) int {
 	return -1
 }
 
+// ziplistGet 按索引获取 entry 数据（会分配新 []byte）。
 func ziplistGet(arena *Arena, zlOff int, index int) []byte {
 	if zlOff == 0 || index < 0 {
 		return nil
@@ -276,6 +296,7 @@ func ziplistGet(arena *Arena, zlOff int, index int) []byte {
 	return ziplistReadEntryData(arena, pos)
 }
 
+// ziplistInsert 在 ziplist 头部或尾部插入数据。atHead=true 时插入头部。
 func ziplistInsert(arena *Arena, zlOff int, data []byte, atHead bool) int {
 	num := ziplistNumEntries(arena, zlOff)
 	oldSize := ziplistTotalBytes(arena, zlOff)
@@ -298,12 +319,10 @@ func ziplistInsert(arena *Arena, zlOff int, data []byte, atHead bool) int {
 	}
 
 	entrySize := ziplistEntrySize(prevLen, data)
-
 	newSize := oldSize + entrySize
 	zlOff = ziplistResize(arena, zlOff, newSize)
 
 	absInsertPos := zlOff + relInsertPos
-
 	remainSize := oldSize - relInsertPos - 1
 	if remainSize > 0 {
 		src := arena.ReadBytes(absInsertPos, remainSize)
@@ -320,7 +339,6 @@ func ziplistInsert(arena *Arena, zlOff int, data []byte, atHead bool) int {
 	}
 
 	ziplistSetNumEntries(arena, zlOff, num+1)
-
 	if atHead {
 		ziplistSetTailOffset(arena, zlOff, ziplistTailOffset(arena, zlOff)+entrySize)
 	} else {
@@ -330,6 +348,7 @@ func ziplistInsert(arena *Arena, zlOff int, data []byte, atHead bool) int {
 	return zlOff
 }
 
+// ziplistDelete 删除指定索引的 entry。
 func ziplistDelete(arena *Arena, zlOff int, index int) int {
 	if zlOff == 0 {
 		return 0
@@ -368,6 +387,7 @@ func ziplistDelete(arena *Arena, zlOff int, index int) int {
 	return zlOff
 }
 
+// ziplistLen 返回 ziplist 中 entry 数量。
 func ziplistLen(arena *Arena, zlOff int) int {
 	if zlOff == 0 {
 		return 0
@@ -375,6 +395,7 @@ func ziplistLen(arena *Arena, zlOff int) int {
 	return ziplistNumEntries(arena, zlOff)
 }
 
+// bytesEqual 逐字节比较两个字节切片是否相等。
 func bytesEqual(a, b []byte) bool {
 	if len(a) != len(b) {
 		return false

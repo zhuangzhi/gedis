@@ -98,7 +98,7 @@ func (db *RedisDB) GeoAdd(key string, lon, lat float64, member string) int {
 	hash := geohashEncode(lon, lat)
 	score := float64(hash)
 	pb := Buf(member)
-	n := db.ZAdd(key, score, pb)
+	n := db.ZAddBuffer(key, score, pb)
 	pb.Close()
 	return n
 }
@@ -128,7 +128,10 @@ func (db *RedisDB) GeoDist(key, member1, member2, unit string) float64 {
 }
 
 // GeoRadius 获取以指定坐标为中心、指定半径范围内的地理位置成员。
-func (db *RedisDB) GeoRadius(key string, lon, lat, radius float64, unit string) []string {
+// 对应 Redis: GEORADIUS key longitude latitude radius unit
+// 优化：返回 *ZSlices 替代 []string，成员在 Arena 中零拷贝读取。
+// 调用方用 zs.Len()/zs.Get(i) 遍历后用 zs.Close() 归还底层缓冲区。
+func (db *RedisDB) GeoRadius(key string, lon, lat, radius float64, unit string) *ZSlices {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -148,29 +151,33 @@ func (db *RedisDB) GeoRadius(key string, lon, lat, radius float64, unit string) 
 	radiusMeters := convertToMeters(radius, unit)
 	zsl := zslLoadFromArena(db.arena, dataOff)
 
-	var result []string
+	result := NewZSlices()
 
 	x := int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, zsl.headerOff, 0)))
 	for x != 0 {
 		xMemberOff := int(db.arena.ReadUint32(zslNodeMemberOff(db.arena, x)))
-		member := db.arena.ReadBytes(xMemberOff, db.arena.SizeAt(xMemberOff))
+		member := db.arena.GetSlice(xMemberOff, db.arena.SizeAt(xMemberOff))
 
 		hash := uint64(db.arena.ReadFloat64(zslNodeScoreOff(db.arena, x)))
 		mlon, mlat := geohashDecode(hash)
 		dist := haversineDistance(lon, lat, mlon, mlat)
 
 		if dist <= radiusMeters {
-			result = append(result, string(member))
+			result.Add(member)
 		}
 
 		x = int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, x, 0)))
 	}
 
+	result.Finish()
 	return result
 }
 
 // GeoRadiusByMember 获取以指定成员位置为中心、指定半径范围内的成员。
-func (db *RedisDB) GeoRadiusByMember(key, member string, radius float64, unit string) []string {
+// 对应 Redis: GEORADIUSBYMEMBER key member radius unit
+// 优化：返回 *ZSlices 替代 []string，内部委托 GeoRadius。
+// 调用方用 zs.Len()/zs.Get(i) 遍历后用 zs.Close() 归还底层缓冲区。
+func (db *RedisDB) GeoRadiusByMember(key, member string, radius float64, unit string) *ZSlices {
 	_, lon, lat, ok := db.geoGetCoords(key, member)
 	if !ok {
 		return nil
@@ -198,7 +205,7 @@ func (db *RedisDB) GeoPos(key string, members ...string) [][2]float64 {
 
 func (db *RedisDB) geoGetCoords(key, member string) (hash uint64, lon, lat float64, ok bool) {
 	pb := Buf(member)
-	score, found := db.ZScore(key, pb)
+	score, found := db.ZScoreBuffer(key, pb)
 	pb.Close()
 	if !found {
 		return 0, 0, 0, false

@@ -38,15 +38,28 @@ func NewPool() *LeveledPool { return NewLeveledPool(defaultSizes) }
 
 var defaultBufPool = NewPool()
 
-// Buf 从默认池创建包含 s 内容的 PooledBuffer。调用方使用后须 Close。
+// Buf 从默认池创建包含 s 内容的 PooledBuffer。
+// 与普通 []byte 的区别：缓冲区从分级池中获取，使用后须调用 pb.Close() 归还，
+// 避免 []byte 分配导致的 GC 压力。
+// 用法：pb := Buf("hello"); db.Set("k", pb); pb.Close()
 func Buf(s string) *PooledBuffer {
 	pb := defaultBufPool.Get(len(s))
 	pb.WriteString(s)
 	return pb
 }
 
-// NewBuf 从默认池获取空 PooledBuffer。调用方使用后须 Close。
+// NewBuf 从默认池获取空 PooledBuffer。
+// 与 make([]byte, minCap) 的区别：缓冲区从池中复用，使用后须 Close() 归还。
+// 用法：pb := NewBuf(256); pb.Write(data); ...; pb.Close()
 func NewBuf(minCap int) *PooledBuffer { return defaultBufPool.Get(minCap) }
+
+// BufFromBytes 从默认池获取一个缓冲区并写入字节切片 b。
+// 用法：pb := BufFromBytes(myBytes); ...; pb.Close()
+func BufFromBytes(b []byte) *PooledBuffer {
+	pb := defaultBufPool.Get(len(b))
+	pb.buf.Write(b)
+	return pb
+}
 
 // ============================================================================
 
@@ -104,7 +117,23 @@ func (lp *LeveledPool) put(pb *PooledBuffer) {
 }
 
 // PooledBuffer 是一个可池化复用的 bytes.Buffer 包装。
-// 委托 bytes.Buffer 实现 io.ReaderWriter 接口，超出池容量时自动升级。
+// 替代 []byte 作为 API 入参/返回值，通过 Close() 归还缓冲区到全局分级池。
+//
+// PooledBuffer 与 []byte 的核心区别：
+//   - 从 sync.Pool 分级池分配，GC 压力接近于零
+//   - 容量不足时自动跃迁到更高级别缓冲区
+//   - 作为 API 入参：调用方通过 Buf(s)/NewBuf(cap) 获取，传给 API 后立即 Close()
+//   - 作为 API 返回值：调用方读取 .Bytes()/.String() 后必须 Close() 归还
+//
+// 使用示例：
+//
+//	pb := Buf("hello")
+//	db.Set("key", pb)
+//	pb.Close()
+//
+//	v, _ := db.Get("key")
+//	fmt.Println(v.String())
+//	v.Close()
 type PooledBuffer struct {
 	buf   *bytes.Buffer
 	pool  *LeveledPool // nil 表示不回收

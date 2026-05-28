@@ -87,7 +87,11 @@ func (db *RedisDB) FTAdd(index string, docID string, fields map[string]string) {
 	}
 }
 
-func (db *RedisDB) FTSearch(index string, query string, limit int) []string {
+// FTSearch 在全文索引中搜索关键词并返回匹配的文档 ID。
+// 对应 Redis: FT.SEARCH index query
+// 优化：返回 *ZSlices 替代 []string，数据在 Arena 中紧凑存储。
+// 调用方用 zs.Len()/zs.Get(i) 遍历后用 zs.Close() 归还底层缓冲区。
+func (db *RedisDB) FTSearch(index string, query string, limit int) *ZSlices {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -135,7 +139,12 @@ func (db *RedisDB) FTSearch(index string, query string, limit int) []string {
 		result = result[:limit]
 	}
 
-	return result
+	zs := NewZSlices()
+	for _, r := range result {
+		zs.AddString(r)
+	}
+	zs.Finish()
+	return zs
 }
 
 func (db *RedisDB) ensureSearchIndex(index string, schema map[string]string) {
