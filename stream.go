@@ -220,6 +220,7 @@ func (db *RedisDB) XGroupCreate(key, group, startID string) error {
 	db.arena.WriteUint32(groupDataOff+16, 0)
 
 	groupsDict.Set([]byte(group), groupDataOff)
+	groupsDict.StoreMeta(groupsOff)
 	return nil
 }
 

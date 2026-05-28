@@ -43,26 +43,30 @@ const (
 func ziplistNew(arena *Arena) int {
 	size := ziplistHeaderSize + 1 // +1 for end byte
 	off := arena.Alloc(size)
-	arena.WriteUint32(off, uint32(size))          // zlbytes
+	arena.WriteUint32(off, uint32(size))                // zlbytes
 	arena.WriteUint32(off+4, uint32(ziplistHeaderSize)) // zltail
-	arena.WriteUint16(off+8, 0)                  // zllen
+	arena.WriteUint16(off+8, 0)                         // zllen
 	arena.WriteByte(off+ziplistHeaderSize, ziplistEndByte)
 	return off
 }
 
 // === Ziplist header 访问器 ===
 
-func ziplistTotalBytes(arena *Arena, zlOff int) int    { return int(arena.ReadUint32(zlOff)) }
+func ziplistTotalBytes(arena *Arena, zlOff int) int       { return int(arena.ReadUint32(zlOff)) }
 func ziplistSetTotalBytes(arena *Arena, zlOff int, v int) { arena.WriteUint32(zlOff, uint32(v)) }
-func ziplistTailOffset(arena *Arena, zlOff int) int    { return int(arena.ReadUint32(zlOff + 4)) }
-func ziplistSetTailOffset(arena *Arena, zlOff int, v int)  { arena.WriteUint32(zlOff+4, uint32(v)) }
-func ziplistNumEntries(arena *Arena, zlOff int) int    { return int(arena.ReadUint16(zlOff + 8)) }
-func ziplistSetNumEntries(arena *Arena, zlOff int, v int)  { arena.WriteUint16(zlOff+8, uint16(v)) }
+func ziplistTailOffset(arena *Arena, zlOff int) int       { return int(arena.ReadUint32(zlOff + 4)) }
+func ziplistSetTailOffset(arena *Arena, zlOff int, v int) { arena.WriteUint32(zlOff+4, uint32(v)) }
+func ziplistNumEntries(arena *Arena, zlOff int) int       { return int(arena.ReadUint16(zlOff + 8)) }
+func ziplistSetNumEntries(arena *Arena, zlOff int, v int) { arena.WriteUint16(zlOff+8, uint16(v)) }
 
 // ziplistResize 调整 ziplist 大小。会将数据迁移到 Arena 新位置。
 func ziplistResize(arena *Arena, zlOff int, newSize int) int {
 	oldSize := ziplistTotalBytes(arena, zlOff)
-	data := arena.ReadBytes(zlOff, oldSize)
+	copySize := oldSize
+	if newSize < oldSize {
+		copySize = newSize
+	}
+	data := arena.ReadBytes(zlOff, copySize)
 	arena.Free(zlOff)
 	newOff := arena.Alloc(newSize)
 	arena.WriteBytes(newOff, data)
@@ -325,8 +329,7 @@ func ziplistInsert(arena *Arena, zlOff int, data []byte, atHead bool) int {
 	absInsertPos := zlOff + relInsertPos
 	remainSize := oldSize - relInsertPos - 1
 	if remainSize > 0 {
-		src := arena.ReadBytes(absInsertPos, remainSize)
-		arena.WriteBytes(absInsertPos+entrySize, src)
+		arena.WriteBytes(absInsertPos+entrySize, arena.GetSlice(absInsertPos, remainSize))
 	}
 
 	ziplistWriteEntry(arena, absInsertPos, prevLen, data)
@@ -366,11 +369,20 @@ func ziplistDelete(arena *Arena, zlOff int, index int) int {
 	entrySize := ziplistEntryTotalSize(arena, pos)
 	oldSize := ziplistTotalBytes(arena, zlOff)
 
+	newNextPrevLen := 0
+	needUpdateNext := num > 1 && index < num-1
+	if needUpdateNext {
+		newNextPrevLen, _ = ziplistEntryPrevLen(arena, pos)
+	}
+
 	remainStart := pos + entrySize
 	remainSize := oldSize - (remainStart - zlOff)
 	if remainSize > 0 {
-		src := arena.ReadBytes(remainStart, remainSize)
-		arena.WriteBytes(pos, src)
+		arena.WriteBytes(pos, arena.GetSlice(remainStart, remainSize))
+	}
+
+	if needUpdateNext {
+		ziplistWritePrevLen(arena, pos, newNextPrevLen)
 	}
 
 	newSize := oldSize - entrySize
@@ -379,9 +391,6 @@ func ziplistDelete(arena *Arena, zlOff int, index int) int {
 
 	if num-1 == 0 {
 		ziplistSetTailOffset(arena, zlOff, ziplistHeaderSize)
-	} else if index < num-1 {
-		nextEntryOff := pos
-		ziplistWritePrevLen(arena, nextEntryOff, entrySize)
 	}
 
 	return zlOff

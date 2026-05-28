@@ -1,32 +1,69 @@
 package gedis
 
 import (
-	"fmt"
 	"math/rand"
+	"strconv"
 	"sync"
 	"testing"
 )
 
 const benchKeyPool = 10000
 
+var (
+	benchBytesValue      = []byte("value")
+	benchBytesX          = []byte("x")
+	benchBytesV          = []byte("v")
+	benchBytesV1         = []byte("v1")
+	benchBytesHello      = []byte("hello")
+	benchBytesItem       = []byte("item")
+	benchBytesMember     = []byte("member")
+	benchBytesVal        = []byte("val")
+	benchBytesNew        = []byte("new")
+	benchBytesNewVal     = []byte("new-val")
+	benchBytesY          = []byte("y")
+	benchBytesA          = []byte("a")
+	benchBytesB          = []byte("b")
+	benchBytesM0         = []byte("m0")
+	benchBytesM1         = []byte("m1")
+	benchBytesWORLD      = []byte("WORLD")
+	benchBytesInit       = []byte("init")
+	benchBytesHelloWorld = []byte("hello world hello world")
+	benchBytesLarge      = []byte("large-value-data")
+	benchBytes0          = []byte("0")
+)
+
 func BenchmarkSet(b *testing.B) {
 	db := New()
+	var keyBuf, valBuf [24]byte
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		db.Set(fmt.Sprintf("key%d", i), []byte(fmt.Sprintf("value%d", i)))
+		kn := copy(keyBuf[:], "key")
+		kn += len(strconv.AppendInt(keyBuf[kn:kn], int64(i), 10))
+		key := string(keyBuf[:kn])
+		vn := copy(valBuf[:], "value")
+		vn += len(strconv.AppendInt(valBuf[vn:vn], int64(i), 10))
+		db.Set(key, []byte(string(valBuf[:vn])))
 	}
 }
 
 func BenchmarkGet(b *testing.B) {
 	db := New()
+	var buf [24]byte
 	for i := 0; i < benchKeyPool; i++ {
-		db.Set(fmt.Sprintf("key%d", i), []byte(fmt.Sprintf("value%d", i)))
+		n := copy(buf[:], "key")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		key := string(buf[:n])
+		n2 := copy(buf[:], "value")
+		n2 += len(strconv.AppendInt(buf[n2:n2], int64(i), 10))
+		db.Set(key, []byte(string(buf[:n2])))
 	}
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		pb, _ := db.Get(fmt.Sprintf("key%d", i%benchKeyPool))
+		n := copy(buf[:], "key")
+		n += len(strconv.AppendInt(buf[n:n], int64(i%benchKeyPool), 10))
+		pb, _ := db.Get(string(buf[:n]))
 		if pb != nil {
 			pb.Close()
 		}
@@ -35,11 +72,14 @@ func BenchmarkGet(b *testing.B) {
 
 func BenchmarkSetGet(b *testing.B) {
 	db := New()
+	var buf [24]byte
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		key := fmt.Sprintf("key%d", i)
-		db.Set(key, []byte("value"))
+		n := copy(buf[:], "key")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		key := string(buf[:n])
+		db.Set(key, benchBytesValue)
 		pb, _ := db.Get(key)
 		if pb != nil {
 			pb.Close()
@@ -51,10 +91,13 @@ func BenchmarkSetGetThreaded(b *testing.B) {
 	db := New()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
+		var buf [24]byte
 		i := 0
 		for pb.Next() {
-			key := fmt.Sprintf("key%d", i)
-			db.Set(key, []byte("value"))
+			n := copy(buf[:], "key")
+			n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+			key := string(buf[:n])
+			db.Set(key, benchBytesValue)
 			v, _ := db.Get(key)
 			if v != nil {
 				v.Close()
@@ -69,7 +112,7 @@ func BenchmarkLPushLPop(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		db.LPush("list", []byte("hello"))
+		db.LPush("list", benchBytesHello)
 		v, _ := db.LPop("list")
 		if v != nil {
 			v.Close()
@@ -82,7 +125,7 @@ func BenchmarkRPushRPop(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		db.RPush("list", []byte("hello"))
+		db.RPush("list", benchBytesHello)
 		v, _ := db.RPop("list")
 		if v != nil {
 			v.Close()
@@ -95,7 +138,7 @@ func BenchmarkHSetHGet(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		db.HSet("hash", "field", []byte("value"))
+		db.HSet("hash", "field", benchBytesValue)
 		v, _ := db.HGet("hash", "field")
 		if v != nil {
 			v.Close()
@@ -108,8 +151,8 @@ func BenchmarkSAddSIsMember(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		db.SAdd("set", []byte("member"))
-		db.SIsMember("set", []byte("member"))
+		db.SAdd("set", benchBytesMember)
+		db.SIsMember("set", benchBytesMember)
 	}
 }
 
@@ -118,15 +161,18 @@ func BenchmarkZAddZScore(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		db.ZAdd("zset", float64(i), []byte("member"))
-		db.ZScore("zset", []byte("member"))
+		db.ZAdd("zset", float64(i), benchBytesMember)
+		db.ZScore("zset", benchBytesMember)
 	}
 }
 
 func BenchmarkZAddZRange(b *testing.B) {
 	db := New()
+	var buf [24]byte
 	for i := 0; i < 10000; i++ {
-		db.ZAdd("zset", float64(i), []byte(fmt.Sprintf("member%d", i)))
+		n := copy(buf[:], "member")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		db.ZAdd("zset", float64(i), []byte(string(buf[:n])))
 	}
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -143,17 +189,20 @@ func BenchmarkBFAddBFExists(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		db.BFAdd("bf", []byte("item"))
-		db.BFExists("bf", []byte("item"))
+		db.BFAdd("bf", benchBytesItem)
+		db.BFExists("bf", benchBytesItem)
 	}
 }
 
 func BenchmarkPFAdd(b *testing.B) {
 	db := New()
+	var buf [24]byte
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		pb := Buf(fmt.Sprintf("item%d", i))
+		n := copy(buf[:], "item")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		pb := BufFromBytes(buf[:n])
 		db.PFAddBuffer("hll", pb)
 		pb.Close()
 	}
@@ -169,9 +218,12 @@ func BenchmarkThreadedSetGet(b *testing.B) {
 		go func(gid int) {
 			defer wg.Done()
 			r := rand.New(rand.NewSource(int64(gid)))
+			var buf [24]byte
 			for i := 0; i < b.N/10; i++ {
-				key := fmt.Sprintf("key%d", r.Intn(benchKeyPool))
-				db.Set(key, []byte("value"))
+				n := copy(buf[:], "key")
+				n += len(strconv.AppendInt(buf[n:n], int64(r.Intn(benchKeyPool)), 10))
+				key := string(buf[:n])
+				db.Set(key, benchBytesValue)
 				v, _ := db.Get(key)
 				if v != nil {
 					v.Close()
@@ -184,31 +236,40 @@ func BenchmarkThreadedSetGet(b *testing.B) {
 
 func BenchmarkManySets(b *testing.B) {
 	db := New()
+	var buf [24]byte
 	b.ResetTimer()
 	b.ReportAllocs()
+	value := []byte("x")
 	for i := 0; i < b.N; i++ {
 		for j := 0; j < 1000; j++ {
-			key := fmt.Sprintf("key%d", j+i*1000)
-			db.Set(key, []byte("x"))
+			n := copy(buf[:], "key")
+			n += len(strconv.AppendInt(buf[n:n], int64(j+i*1000), 10))
+			key := string(buf[:n])
+			db.Set(key, value)
 		}
 	}
 }
 
 func BenchmarkSetThenGet(b *testing.B) {
 	db := New()
+	var buf [24]byte
 	for i := 0; i < benchKeyPool; i++ {
-		db.Set(fmt.Sprintf("key%d", i), []byte("val"))
+		n := copy(buf[:], "key")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		db.Set(string(buf[:n]), benchBytesVal)
 	}
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		db.Set(fmt.Sprintf("key%d", i%benchKeyPool), []byte("new"))
+		n := copy(buf[:], "key")
+		n += len(strconv.AppendInt(buf[n:n], int64(i%benchKeyPool), 10))
+		db.Set(string(buf[:n]), benchBytesNew)
 	}
 }
 
 func BenchmarkGetSimple(b *testing.B) {
 	db := New()
-	db.Set("key", []byte("value"))
+	db.Set("key", benchBytesValue)
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
@@ -224,35 +285,38 @@ func BenchmarkSetSimple(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		db.Set("key", []byte("value"))
+		db.Set("key", benchBytesValue)
 	}
 }
 
 func BenchmarkAppend(b *testing.B) {
 	db := New()
-	db.Set("key", []byte("init"))
+	db.Set("key", benchBytesInit)
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		db.Append("key", []byte("x"))
+		db.Append("key", benchBytesX)
 	}
 }
 
 func BenchmarkSetRange(b *testing.B) {
 	db := New()
-	db.Set("key", []byte("hello world hello world"))
+	db.Set("key", benchBytesHelloWorld)
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		db.SetRange("key", 6, []byte("WORLD"))
+		db.SetRange("key", 6, benchBytesWORLD)
 	}
 }
 
 func BenchmarkLIndex(b *testing.B) {
 	db := New()
-	db.Set("key", []byte("hello"))
+	db.Set("key", benchBytesHello)
+	var buf [24]byte
 	for i := 0; i < 100; i++ {
-		db.RPush("list", []byte(fmt.Sprintf("item%d", i)))
+		n := copy(buf[:], "item")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		db.RPush("list", []byte(string(buf[:n])))
 	}
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -267,19 +331,19 @@ func BenchmarkLIndex(b *testing.B) {
 func BenchmarkLInsert(b *testing.B) {
 	db := New()
 	for i := 0; i < 100; i++ {
-		db.RPush("list", []byte("x"))
+		db.RPush("list", benchBytesX)
 	}
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		db.RPush("list", []byte("y"))
+		db.RPush("list", benchBytesY)
 	}
 }
 
 func BenchmarkLRange(b *testing.B) {
 	db := New()
 	for i := 0; i < 100; i++ {
-		db.RPush("list", []byte("x"))
+		db.RPush("list", benchBytesX)
 	}
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -291,27 +355,39 @@ func BenchmarkLRange(b *testing.B) {
 
 func BenchmarkHSet(b *testing.B) {
 	db := New()
+	var buf [24]byte
+	value := []byte("x")
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		db.HSet("hash", fmt.Sprintf("f%d", i), []byte("v"))
+		n := copy(buf[:], "f")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		key := string(buf[:n])
+		db.HSet("hash", key, value)
 	}
 }
 
 func BenchmarkHDel(b *testing.B) {
 	db := New()
+	var buf [24]byte
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		db.HSet("hash", fmt.Sprintf("tmp%d", i), []byte("x"))
-		db.HDel("hash", fmt.Sprintf("tmp%d", i))
+		n := copy(buf[:], "tmp")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		key := string(buf[:n])
+		db.HSet("hash", key, benchBytesX)
+		db.HDel("hash", key)
 	}
 }
 
 func BenchmarkHGetAll(b *testing.B) {
 	db := New()
+	var buf [24]byte
 	for i := 0; i < 100; i++ {
-		db.HSet("hash", fmt.Sprintf("f%d", i), []byte("v"))
+		n := copy(buf[:], "f")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		db.HSet("hash", string(buf[:n]), benchBytesV)
 	}
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -323,7 +399,7 @@ func BenchmarkHGetAll(b *testing.B) {
 
 func BenchmarkHIncrBy(b *testing.B) {
 	db := New()
-	db.HSet("hash", "count", []byte("0"))
+	db.HSet("hash", "count", benchBytes0)
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
@@ -333,7 +409,7 @@ func BenchmarkHIncrBy(b *testing.B) {
 
 func BenchmarkHExists(b *testing.B) {
 	db := New()
-	db.HSet("hash", "f1", []byte("v1"))
+	db.HSet("hash", "f1", benchBytesV1)
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
@@ -343,29 +419,40 @@ func BenchmarkHExists(b *testing.B) {
 
 func BenchmarkHSetLarge(b *testing.B) {
 	db := New()
+	var buf [24]byte
 	for i := 0; i < 1000; i++ {
-		db.HSet("hash", fmt.Sprintf("f%d", i), []byte("large-value-data"))
+		n := copy(buf[:], "f")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		db.HSet("hash", string(buf[:n]), benchBytesLarge)
 	}
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		db.HSet("hash", fmt.Sprintf("f%d", i%1000), []byte("new-val"))
+		n := copy(buf[:], "f")
+		n += len(strconv.AppendInt(buf[n:n], int64(i%1000), 10))
+		db.HSet("hash", string(buf[:n]), benchBytesNewVal)
 	}
 }
 
 func BenchmarkSAdd(b *testing.B) {
 	db := New()
+	var buf [24]byte
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		db.SAdd("set", []byte(fmt.Sprintf("m%d", i)))
+		n := copy(buf[:], "m")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		db.SAdd("set", []byte(string(buf[:n])))
 	}
 }
 
 func BenchmarkSMembers(b *testing.B) {
 	db := New()
+	var buf [24]byte
 	for i := 0; i < 100; i++ {
-		db.SAdd("set", []byte(fmt.Sprintf("m%d", i)))
+		n := copy(buf[:], "m")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		db.SAdd("set", []byte(string(buf[:n])))
 	}
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -377,22 +464,33 @@ func BenchmarkSMembers(b *testing.B) {
 
 func BenchmarkSRem(b *testing.B) {
 	db := New()
+	var buf [24]byte
 	for i := 0; i < 200; i++ {
-		db.SAdd("set", []byte(fmt.Sprintf("m%d", i)))
+		n := copy(buf[:], "m")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		db.SAdd("set", []byte(string(buf[:n])))
 	}
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		db.SAdd("set", []byte(fmt.Sprintf("t%d", i)))
-		db.SRem("set", []byte(fmt.Sprintf("t%d", i)))
+		n := copy(buf[:], "t")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		key := string(buf[:n])
+		db.SAdd("set", []byte(key))
+		db.SRem("set", []byte(key))
 	}
 }
 
 func BenchmarkSInter(b *testing.B) {
 	db := New()
+	var buf [24]byte
 	for i := 0; i < 100; i++ {
-		db.SAdd("set1", []byte(fmt.Sprintf("m%d", i)))
-		db.SAdd("set2", []byte(fmt.Sprintf("m%d", i+50)))
+		n := copy(buf[:], "m")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		db.SAdd("set1", []byte(string(buf[:n])))
+		n = copy(buf[:], "m")
+		n += len(strconv.AppendInt(buf[n:n], int64(i+50), 10))
+		db.SAdd("set2", []byte(string(buf[:n])))
 	}
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -404,9 +502,14 @@ func BenchmarkSInter(b *testing.B) {
 
 func BenchmarkSUnion(b *testing.B) {
 	db := New()
+	var buf [24]byte
 	for i := 0; i < 100; i++ {
-		db.SAdd("set1", []byte(fmt.Sprintf("m%d", i)))
-		db.SAdd("set2", []byte(fmt.Sprintf("m%d", i+50)))
+		n := copy(buf[:], "m")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		db.SAdd("set1", []byte(string(buf[:n])))
+		n = copy(buf[:], "m")
+		n += len(strconv.AppendInt(buf[n:n], int64(i+50), 10))
+		db.SAdd("set2", []byte(string(buf[:n])))
 	}
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -418,30 +521,43 @@ func BenchmarkSUnion(b *testing.B) {
 
 func BenchmarkZAdd(b *testing.B) {
 	db := New()
+	var buf [24]byte
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		db.ZAdd("zset", float64(i), []byte(fmt.Sprintf("m%d", i)))
+		n := copy(buf[:], "m")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		db.ZAdd("zset", float64(i), []byte(string(buf[:n])))
 	}
 }
 
 func BenchmarkZRem(b *testing.B) {
 	db := New()
-	db.ZAdd("zset", 9999.0, []byte(fmt.Sprintf("m%d", 9999)))
+	var buf [24]byte
+	n := copy(buf[:], "m")
+	n += len(strconv.AppendInt(buf[n:n], int64(9999), 10))
+	db.ZAdd("zset", 9999.0, []byte(string(buf[:n])))
 	for i := 0; i < b.N; i++ {
-		db.ZAdd("zset", float64(i), []byte(fmt.Sprintf("m%d", i)))
+		n := copy(buf[:], "m")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		db.ZAdd("zset", float64(i), []byte(string(buf[:n])))
 	}
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		db.ZRem("zset", []byte(fmt.Sprintf("m%d", i)))
+		n := copy(buf[:], "m")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		db.ZRem("zset", []byte(string(buf[:n])))
 	}
 }
 
 func BenchmarkZCard(b *testing.B) {
 	db := New()
+	var buf [24]byte
 	for i := 0; i < 1000; i++ {
-		db.ZAdd("zset", float64(i), []byte(fmt.Sprintf("m%d", i)))
+		n := copy(buf[:], "m")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		db.ZAdd("zset", float64(i), []byte(string(buf[:n])))
 	}
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -452,8 +568,11 @@ func BenchmarkZCard(b *testing.B) {
 
 func BenchmarkZRangeByScore(b *testing.B) {
 	db := New()
+	var buf [24]byte
 	for i := 0; i < 10000; i++ {
-		db.ZAdd("zset", float64(i), []byte(fmt.Sprintf("m%d", i)))
+		n := copy(buf[:], "m")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		db.ZAdd("zset", float64(i), []byte(string(buf[:n])))
 	}
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -465,8 +584,11 @@ func BenchmarkZRangeByScore(b *testing.B) {
 
 func BenchmarkZRange(b *testing.B) {
 	db := New()
+	var buf [24]byte
 	for i := 0; i < 10000; i++ {
-		db.ZAdd("zset", float64(i), []byte(fmt.Sprintf("m%d", i)))
+		n := copy(buf[:], "m")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		db.ZAdd("zset", float64(i), []byte(string(buf[:n])))
 	}
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -478,14 +600,19 @@ func BenchmarkZRange(b *testing.B) {
 
 func BenchmarkZRemRangeByScore(b *testing.B) {
 	db := New()
+	var buf [24]byte
 	for i := 0; i < 1000; i++ {
-		db.ZAdd("zset", float64(i), []byte(fmt.Sprintf("m%d", i)))
+		n := copy(buf[:], "m")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		db.ZAdd("zset", float64(i), []byte(string(buf[:n])))
 	}
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		for j := 0; j < 100; j++ {
-			db.ZAdd("zset", float64(j), []byte(fmt.Sprintf("m%d", j)))
+			n := copy(buf[:], "m")
+			n += len(strconv.AppendInt(buf[n:n], int64(j), 10))
+			db.ZAdd("zset", float64(j), []byte(string(buf[:n])))
 		}
 		db.ZRemRangeByScore("zset", 0, 99)
 	}
@@ -493,8 +620,11 @@ func BenchmarkZRemRangeByScore(b *testing.B) {
 
 func BenchmarkPFCount(b *testing.B) {
 	db := New()
+	var buf [24]byte
 	for i := 0; i < 10000; i++ {
-		pb := Buf(fmt.Sprintf("item%d", i))
+		n := copy(buf[:], "item")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		pb := BufFromBytes(buf[:n])
 		db.PFAddBuffer("hll", pb)
 		pb.Close()
 	}
@@ -522,66 +652,89 @@ func BenchmarkBFCuckoo(b *testing.B) {
 	db := New()
 	db.BFReserve("bf", 0.01, 100000)
 	db.CFReserve("cf", 10000)
+	var buf [24]byte
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		db.BFAdd("bf", []byte(fmt.Sprintf("i%d", i)))
-		db.CFAdd("cf", []byte(fmt.Sprintf("i%d", i)))
+		n := copy(buf[:], "i")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		key := []byte(string(buf[:n]))
+		db.BFAdd("bf", key)
+		db.CFAdd("cf", key)
 	}
 }
 
 func BenchmarkCFAddCFExists(b *testing.B) {
 	db := New()
 	db.CFReserve("cf", 100000)
+	var buf [24]byte
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		db.CFAdd("cf", []byte(fmt.Sprintf("x%d", i)))
-		_ = db.CFExists("cf", []byte("item"))
+		n := copy(buf[:], "x")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		db.CFAdd("cf", []byte(string(buf[:n])))
+		_ = db.CFExists("cf", benchBytesItem)
 	}
 }
 
 func BenchmarkCFAddCFDel(b *testing.B) {
 	db := New()
 	db.CFReserve("cf", 100000)
+	var buf [24]byte
 	for i := 0; i < b.N; i++ {
-		db.CFAdd("cf", []byte(fmt.Sprintf("t%d", i)))
+		n := copy(buf[:], "t")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		db.CFAdd("cf", []byte(string(buf[:n])))
 	}
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		db.CFAdd("cf", []byte(fmt.Sprintf("n%d", i)))
-		db.CFDel("cf", []byte(fmt.Sprintf("t%d", i)))
+		n := copy(buf[:], "n")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		db.CFAdd("cf", []byte(string(buf[:n])))
+		n = copy(buf[:], "t")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		db.CFDel("cf", []byte(string(buf[:n])))
 	}
 }
 
 func BenchmarkCMSIncrBy(b *testing.B) {
 	db := New()
 	db.CMSInitByDim("cms", 2000, 10)
+	var buf [24]byte
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		db.CMSIncrBy("cms", []byte(fmt.Sprintf("item%d", i)), 1)
+		n := copy(buf[:], "item")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		db.CMSIncrBy("cms", []byte(string(buf[:n])), 1)
 	}
 }
 
 func BenchmarkCMSQuery(b *testing.B) {
 	db := New()
 	db.CMSInitByDim("cms", 2000, 10)
+	var buf [24]byte
 	for i := 0; i < 1000; i++ {
-		db.CMSIncrBy("cms", []byte(fmt.Sprintf("item%d", i)), i)
+		n := copy(buf[:], "item")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		db.CMSIncrBy("cms", []byte(string(buf[:n])), i)
 	}
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		_ = db.CMSQuery("cms", []byte("item0"), []byte("item1"), []byte("item2"))
+		_ = db.CMSQuery("cms", benchBytesItem, benchBytesItem, benchBytesItem)
 	}
 }
 
 func BenchmarkLLen(b *testing.B) {
 	db := New()
+	var buf [24]byte
 	for i := 0; i < 1000; i++ {
-		db.RPush("list", []byte(fmt.Sprintf("i%d", i)))
+		n := copy(buf[:], "i")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		db.RPush("list", []byte(string(buf[:n])))
 	}
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -592,8 +745,11 @@ func BenchmarkLLen(b *testing.B) {
 
 func BenchmarkHLen(b *testing.B) {
 	db := New()
+	var buf [24]byte
 	for i := 0; i < 100; i++ {
-		db.HSet("hash", fmt.Sprintf("f%d", i), []byte("v"))
+		n := copy(buf[:], "f")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		db.HSet("hash", string(buf[:n]), benchBytesV)
 	}
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -604,8 +760,11 @@ func BenchmarkHLen(b *testing.B) {
 
 func BenchmarkSCard(b *testing.B) {
 	db := New()
+	var buf [24]byte
 	for i := 0; i < 100; i++ {
-		db.SAdd("set", []byte(fmt.Sprintf("m%d", i)))
+		n := copy(buf[:], "m")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		db.SAdd("set", []byte(string(buf[:n])))
 	}
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -616,12 +775,15 @@ func BenchmarkSCard(b *testing.B) {
 
 func BenchmarkGeoAdd(b *testing.B) {
 	db := New()
+	var buf [24]byte
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		lon := 13.0 + float64(i)*0.001
 		lat := 37.0 + float64(i)*0.001
-		db.GeoAdd("geo", lon, lat, fmt.Sprintf("p%d", i))
+		n := copy(buf[:], "p")
+		n += len(strconv.AppendInt(buf[n:n], int64(i), 10))
+		db.GeoAdd("geo", lon, lat, string(buf[:n]))
 	}
 }
 
@@ -651,14 +813,14 @@ func BenchmarkBitOp(b *testing.B) {
 
 func BenchmarkObjectEncoding(b *testing.B) {
 	db := New()
-	db.Set("str", []byte("hello"))
-	db.LPush("list", []byte("a"), []byte("b"))
-	db.HSet("hash", "f1", []byte("v1"))
-	db.SAdd("set", []byte("m1"))
-	db.ZAdd("zset", 1.0, []byte("m1"))
+	db.Set("str", benchBytesHello)
+	db.LPush("list", benchBytesA, benchBytesB)
+	db.HSet("hash", "f1", benchBytesV1)
+	db.SAdd("set", benchBytesM1)
+	db.ZAdd("zset", 1.0, benchBytesM1)
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		_ = db.SIsMember("set", []byte("m0"))
+		_ = db.SIsMember("set", benchBytesM0)
 	}
 }

@@ -271,26 +271,26 @@ func main() {
     db := gedis.New()
 
     // Strings
-    db.Set("hello", gedis.Buf("world"))
+    db.Set("hello", []byte("world"))
     val, _ := db.Get("hello")
     fmt.Println(val.String()) // world
     val.Close()
 
     // Lists
-    db.LPush("mylist", gedis.Buf("a"), gedis.Buf("b"), gedis.Buf("c"))
+    db.LPush("mylist", []byte("a"), []byte("b"), []byte("c"))
     v, _ := db.LPop("mylist")
     fmt.Println(v.String()) // c
     v.Close()
 
     // Hashes
-    db.HSet("myhash", "f1", gedis.Buf("v1"))
+    db.HSet("myhash", "f1", []byte("v1"))
     v, _ = db.HGet("myhash", "f1")
     fmt.Println(v.String()) // v1
     v.Close()
 
     // Sorted Sets
-    db.ZAdd("myzset", 1.0, gedis.Buf("a"))
-    db.ZAdd("myzset", 2.0, gedis.Buf("b"))
+    db.ZAdd("myzset", 1.0, []byte("a"))
+    db.ZAdd("myzset", 2.0, []byte("b"))
     members := db.ZRange("myzset", 0, -1)
     for i := 0; i < members.Len(); i++ {
         fmt.Println(string(members.Get(i)))
@@ -300,8 +300,8 @@ func main() {
 
     // Probabilistic - Bloom Filter
     db.BFReserve("bf", 0.01, 1000000)
-    db.BFAdd("bf", gedis.Buf("item1"))
-    exists := db.BFExists("bf", gedis.Buf("item1"))
+    db.BFAdd("bf", []byte("item1"))
+    exists := db.BFExists("bf", []byte("item1"))
     fmt.Println(exists) // true
 }
 ```

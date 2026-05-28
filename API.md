@@ -32,6 +32,11 @@
 
 ## 快速开始
 
+gedis 提供两种 API 风格：
+
+- **`[]byte` 风格**（推荐）：入参使用原生 `[]byte`，简单直接，适合大多数场景。
+- **`*PooledBuffer` 风格**：入参使用池化缓冲区，通过 `Buf(s)` 获取，零分配优化，适合高频场景。方法名带 `Buffer` 后缀。
+
 ```go
 package main
 
@@ -43,11 +48,11 @@ import (
 func main() {
     db := gedis.New()
 
-    db.Set("name", gedis.Buf("Alice"))
-    db.Set("age", gedis.Buf("30"))
-    db.SAdd("users", gedis.Buf("Alice"), gedis.Buf("Bob"), gedis.Buf("Charlie"))
-    db.ZAdd("scores", 95.5, gedis.Buf("Alice"))
-    db.ZAdd("scores", 87.0, gedis.Buf("Bob"))
+    db.Set("name", []byte("Alice"))
+    db.Set("age", []byte("30"))
+    db.SAdd("users", []byte("Alice"), []byte("Bob"), []byte("Charlie"))
+    db.ZAdd("scores", 95.5, []byte("Alice"))
+    db.ZAdd("scores", 87.0, []byte("Bob"))
 
     value, ok := db.Get("name")
     if ok {
@@ -56,10 +61,10 @@ func main() {
     }
 
     members := db.SMembers("users")
-    for _, m := range members {
-        fmt.Println("  user:", m.String())
-        m.Close()
+    for i := 0; i < members.Len(); i++ {
+        fmt.Println("  user:", string(members.Get(i)))
     }
+    members.Close()
 
     results := db.ZRange("scores", 0, -1)
     for i := 0; i < results.Len(); i++ {
@@ -103,13 +108,15 @@ Buf(s) / NewBuf(cap) → 池获取 → 写入数据 → 传给 API → pb.Close(
 | **返回值** | 调用方读取 `.Bytes()` / `.String()` 后**必须** `Close()` |
 | **不 Close 的后果** | 缓冲区泄漏，失去池复用效果，GC 压力回升 |
 
-**作为 API 入参**：
+**作为 API 入参**（使用 `Buffer` 后缀方法）：
 
 ```go
 pb := gedis.Buf("hello")
-db.Set("key", pb)
+db.SetBuffer("key", pb)
 pb.Close()  // ← 必须！传入后立即归还
 ```
+
+> 提示：主 API（如 `Set`/`HSet`/`ZAdd`）接受 `[]byte`，使用简单方便。`Buffer` 后缀版本（如 `SetBuffer`/`HSetBuffer`/`ZAddBuffer`）接受 `*PooledBuffer`，适合高频零分配场景。
 
 **作为 API 返回值**：
 
@@ -171,12 +178,16 @@ doSomething(slice)
 
 ### 类型对比总览
 
-| 场景 | 原生 Go 类型 | 优化类型 | 分配 (100元素) | 释放方式 |
-|------|-------------|----------|---------------|----------|
-| 字符串值读/写 | `[]byte` | `*PooledBuffer` | 0 (池复用) | `Close()` |
-| ZSet 范围查询 | `[][]byte` | `*ZSlices` | 1 (池分配) | `Close()` |
-| ZSet 遍历 | `[][]byte` | `ZRangeIter` 回调 | **0** | 无需释放 |
-| HLL/PFCount | `make([]byte, 12288)` | `Arena.GetSlice` | **0** | 不持有 |
+| 场景 | `[]byte` 风格 API | `*Buffer` 风格 API | 分配 (100元素) | 释放方式 |
+|------|-------------------|--------------------|---------------|----------|
+| 字符串值写 | `Set(k, []byte("v"))` | `SetBuffer(k, Buf("v"))` | 0 (池复用) | `Close()` |
+| 字符串值读 | `Get(k)` → `*PooledBuffer` | 同左 | 0 (池复用) | `Close()` |
+| ZSet 范围查询 | `ZRange(k, 0, -1)` → `*ZSlices` | 同左 | 1 (池分配) | `Close()` |
+| ZSet 遍历 | `ZRangeIter(k, 0, -1, fn)` | 同左 | **0** | 无需释放 |
+| HLL/PFCount | `PFCount(k)` | 同左 | **0** | 无需释放 |
+| List 范围查询 | `LRange(k, 0, -1)` → `*ZSlices` | 同左 | 1 (池分配) | `Close()` |
+| Set 全部成员 | `SMembers(k)` → `*ZSlices` | 同左 | 1 (池分配) | `Close()` |
+| Hash 全部字段 | `HGetAll(k)` → `*ZSlices` | 同左 | 1 (池分配) | `Close()` |
 
 ---
 
@@ -195,7 +206,7 @@ db := gedis.New()
 删除指定键及其关联的数据。
 
 ```go
-db.Set("name", gedis.Buf("Alice"))
+db.Set("name", []byte("Alice"))
 deleted := db.Del("name")  // true
 deleted = db.Del("name")   // false
 ```
@@ -205,7 +216,7 @@ deleted = db.Del("name")   // false
 检查指定键是否存在。
 
 ```go
-db.Set("name", gedis.Buf("Alice"))
+db.Set("name", []byte("Alice"))
 exists := db.Exists("name")   // true
 exists = db.Exists("unknown") // false
 ```
@@ -222,11 +233,11 @@ db.FlushAll()
 
 ## 字符串
 
-所有数据通过 `*PooledBuffer` 传递，这是封装了 `bytes.Buffer` + 内存池的可复用缓冲区，可避免 GC 压力。
+gedis 提供两套入参风格：主 API 使用 `[]byte`，`Buffer` 后缀版本使用 `*PooledBuffer` 实现零分配。
 
 ### `Buf(s string) *PooledBuffer`
 
-从默认池获取一个缓冲区并写入字符串。
+从默认池获取一个缓冲区并写入字符串。`*PooledBuffer` 版本 API（`Buffer` 后缀）的参数来源。
 
 ```go
 pb := gedis.Buf("hello world")
@@ -243,13 +254,33 @@ pb := gedis.NewBuf(1024)
 pb.WriteString("hello")
 ```
 
-### `Set(key string, value *PooledBuffer)`
+### `BufFromBytes(b []byte) *PooledBuffer`
 
-设置键的字符串值。
+从已有 `[]byte` 创建一个池化缓冲区，适用于已持有 `[]byte` 的场景。
 
 ```go
-db.Set("greeting", gedis.Buf("hello world"))
-db.Set("counter", gedis.Buf("42"))
+data := []byte("hello")
+pb := gedis.BufFromBytes(data)
+pb.Close()
+```
+
+### `Set(key string, value []byte)`
+
+设置键的字符串值。`[]byte` 传入，简单直接。
+
+```go
+db.Set("greeting", []byte("hello world"))
+db.Set("counter", []byte("42"))
+```
+
+### `SetBuffer(key string, value *PooledBuffer)`
+
+设置键的字符串值，入参 `*PooledBuffer` 避免堆分配。调用方通过 `Buf(s)` 获取，传入后应立即 `Close()`。
+
+```go
+pb := gedis.Buf("hello world")
+db.SetBuffer("greeting", pb)
+pb.Close()
 ```
 
 ### `Get(key string) (*PooledBuffer, bool)`
@@ -264,13 +295,23 @@ if ok {
 }
 ```
 
-### `Append(key string, value *PooledBuffer) int`
+### `Append(key string, value []byte) int`
 
 在已有字符串值末尾追加数据。
 
 ```go
-db.Set("msg", gedis.Buf("hello"))
-newLen := db.Append("msg", gedis.Buf(" world")) // 11
+db.Set("msg", []byte("hello"))
+newLen := db.Append("msg", []byte(" world")) // 11
+```
+
+### `AppendBuffer(key string, value *PooledBuffer) int`
+
+入参使用 `*PooledBuffer` 避免堆分配。
+
+```go
+pb := gedis.Buf(" world")
+newLen := db.AppendBuffer("msg", pb) // 11
+pb.Close()
 ```
 
 ### `GetRange(key string, start, end int) (*PooledBuffer, bool)`
@@ -278,20 +319,30 @@ newLen := db.Append("msg", gedis.Buf(" world")) // 11
 获取字符串值的子串，支持负数索引。
 
 ```go
-db.Set("msg", gedis.Buf("hello world"))
+db.Set("msg", []byte("hello world"))
 sub, _ := db.GetRange("msg", 0, 4)  // "hello"
 sub.Close()
 sub, _ = db.GetRange("msg", -5, -1) // "world"
 sub.Close()
 ```
 
-### `SetRange(key string, offset int, value *PooledBuffer) int`
+### `SetRange(key string, offset int, value []byte) int`
 
 在指定偏移位置覆写字符串值。
 
 ```go
-db.Set("msg", gedis.Buf("hello world"))
-newLen := db.SetRange("msg", 6, gedis.Buf("gedis")) // "hello gedis"
+db.Set("msg", []byte("hello world"))
+newLen := db.SetRange("msg", 6, []byte("gedis")) // "hello gedis"
+```
+
+### `SetRangeBuffer(key string, offset int, value *PooledBuffer) int`
+
+入参使用 `*PooledBuffer` 避免堆分配。
+
+```go
+pb := gedis.Buf("gedis")
+newLen := db.SetRangeBuffer("msg", 6, pb)
+pb.Close()
 ```
 
 ### `Strlen(key string) int`
@@ -299,7 +350,7 @@ newLen := db.SetRange("msg", 6, gedis.Buf("gedis")) // "hello gedis"
 获取字符串值的长度。
 
 ```go
-db.Set("msg", gedis.Buf("hello"))
+db.Set("msg", []byte("hello"))
 length := db.Strlen("msg") // 5
 ```
 
@@ -308,7 +359,7 @@ length := db.Strlen("msg") // 5
 将字符串值解释为整数并增加指定值。
 
 ```go
-db.Set("counter", gedis.Buf("10"))
+db.Set("counter", []byte("10"))
 newVal, _ := db.IncrBy("counter", 5) // 15
 newVal, _ = db.IncrBy("visits", 1)   // 1 (不存在的key自动初始化)
 ```
@@ -318,7 +369,7 @@ newVal, _ = db.IncrBy("visits", 1)   // 1 (不存在的key自动初始化)
 将字符串值解释为浮点数并增加指定值。
 
 ```go
-db.Set("score", gedis.Buf("10.5"))
+db.Set("score", []byte("10.5"))
 newVal, _ := db.IncrByFloat("score", 0.5) // 11.0
 ```
 
@@ -326,29 +377,45 @@ newVal, _ := db.IncrByFloat("score", 0.5) // 11.0
 
 ## 列表
 
-### `LPush(key string, values ...*PooledBuffer) int`
+### `LPush(key string, values ...[]byte) int`
 
-将一个或多个值从列表左侧插入。
+将一个或多个值从列表左侧插入。`[]byte` 传入，简单直接。
 
 ```go
-db.LPush("queue", gedis.Buf("c"), gedis.Buf("b"), gedis.Buf("a"))
+db.LPush("queue", []byte("c"), []byte("b"), []byte("a"))
 // 列表: ["a", "b", "c"]
 ```
 
-### `RPush(key string, values ...*PooledBuffer) int`
+### `LPushBuffer(key string, values ...*PooledBuffer) int`
+
+入参使用 `*PooledBuffer` 避免堆分配。
+
+```go
+pb1 := gedis.Buf("a")
+pb2 := gedis.Buf("b")
+db.LPushBuffer("queue", pb1, pb2)
+pb1.Close()
+pb2.Close()
+```
+
+### `RPush(key string, values ...[]byte) int`
 
 将一个或多个值从列表右侧插入。
 
 ```go
-db.RPush("queue", gedis.Buf("a"), gedis.Buf("b"), gedis.Buf("c"))
+db.RPush("queue", []byte("a"), []byte("b"), []byte("c"))
 ```
+
+### `RPushBuffer(key string, values ...*PooledBuffer) int`
+
+入参使用 `*PooledBuffer` 避免堆分配。
 
 ### `LPop(key string) (*PooledBuffer, bool)`
 
 从列表左侧弹出并返回一个元素。
 
 ```go
-db.LPush("queue", gedis.Buf("a"), gedis.Buf("b"))
+db.LPush("queue", []byte("a"), []byte("b"))
 val, ok := db.LPop("queue")
 if ok {
     fmt.Println(val.String())
@@ -361,7 +428,7 @@ if ok {
 从列表右侧弹出并返回一个元素。
 
 ```go
-db.RPush("queue", gedis.Buf("a"), gedis.Buf("b"))
+db.RPush("queue", []byte("a"), []byte("b"))
 val, ok := db.RPop("queue")
 if ok {
     fmt.Println(val.String())
@@ -374,22 +441,22 @@ if ok {
 获取列表中指定索引位置的元素。
 
 ```go
-db.RPush("list", gedis.Buf("a"), gedis.Buf("b"), gedis.Buf("c"))
+db.RPush("list", []byte("a"), []byte("b"), []byte("c"))
 val, _ := db.LIndex("list", 1)  // "b"
 if val != nil { val.Close() }
 ```
 
-### `LRange(key string, start, stop int) []*PooledBuffer`
+### `LRange(key string, start, stop int) *ZSlices`
 
-获取列表指定范围内的元素。
+获取列表指定范围内的元素。返回 `*ZSlices`，遍历后须 `zs.Close()`。
 
 ```go
-db.RPush("list", gedis.Buf("a"), gedis.Buf("b"), gedis.Buf("c"), gedis.Buf("d"))
+db.RPush("list", []byte("a"), []byte("b"), []byte("c"), []byte("d"))
 items := db.LRange("list", 1, 2)
-for _, item := range items {
-    fmt.Println(item.String())
-    item.Close()
+for i := 0; i < items.Len(); i++ {
+    fmt.Println(string(items.Get(i)))
 }
+items.Close()
 ```
 
 ### `LLen(key string) int`
@@ -404,14 +471,24 @@ length := db.LLen("queue")
 
 ## 哈希
 
-### `HSet(key, field string, value *PooledBuffer) int`
+### `HSet(key, field string, value []byte) int`
 
-设置哈希表中指定字段的值。
+设置哈希表中指定字段的值。`[]byte` 传入，简单直接。
 
 ```go
-db.HSet("user:1", "name", gedis.Buf("Alice"))
-db.HSet("user:1", "age", gedis.Buf("30"))
-db.HSet("user:1", "email", gedis.Buf("alice@example.com"))
+db.HSet("user:1", "name", []byte("Alice"))
+db.HSet("user:1", "age", []byte("30"))
+db.HSet("user:1", "email", []byte("alice@example.com"))
+```
+
+### `HSetBuffer(key, field string, value *PooledBuffer) int`
+
+入参使用 `*PooledBuffer` 避免堆分配。
+
+```go
+pb := gedis.Buf("Alice")
+db.HSetBuffer("user:1", "name", pb)
+pb.Close()
 ```
 
 ### `HGet(key, field string) (*PooledBuffer, bool)`
@@ -431,24 +508,24 @@ if ok {
 删除哈希表中一个或多个字段。
 
 ```go
-db.HSet("user:1", "tmp1", gedis.Buf("v1"))
-db.HSet("user:1", "tmp2", gedis.Buf("v2"))
+db.HSet("user:1", "tmp1", []byte("v1"))
+db.HSet("user:1", "tmp2", []byte("v2"))
 deleted := db.HDel("user:1", "tmp1", "tmp2") // 2
 ```
 
-### `HGetAll(key string) map[string]*PooledBuffer`
+### `HGetAll(key string) *ZSlices`
 
-获取哈希表中所有字段和值。
+获取哈希表中所有字段和值。返回 `*ZSlices`，格式为 `[field1, value1, field2, value2, ...]`，遍历后须 `zs.Close()`。
 
 ```go
-db.HSet("user:1", "name", gedis.Buf("Alice"))
-db.HSet("user:1", "age", gedis.Buf("30"))
+db.HSet("user:1", "name", []byte("Alice"))
+db.HSet("user:1", "age", []byte("30"))
 
 all := db.HGetAll("user:1")
-for field, val := range all {
-    fmt.Printf("%s: %s\n", field, val.String())
-    val.Close()
+for i := 0; i < all.Len(); i += 2 {
+    fmt.Printf("%s: %s\n", string(all.Get(i)), string(all.Get(i+1)))
 }
+all.Close()
 ```
 
 ### `HIncrBy(key, field string, inc int64) (int64, error)`
@@ -456,7 +533,7 @@ for field, val := range all {
 将哈希表中指定字段的值增加指定数值。
 
 ```go
-db.HSet("user:1", "visits", gedis.Buf("5"))
+db.HSet("user:1", "visits", []byte("5"))
 newVal, _ := db.HIncrBy("user:1", "visits", 3) // 8
 ```
 
@@ -480,41 +557,61 @@ count := db.HLen("user:1")
 
 ## 集合
 
-### `SAdd(key string, members ...*PooledBuffer) int`
+### `SAdd(key string, members ...[]byte) int`
 
-向集合中添加一个或多个成员。
+向集合中添加一个或多个成员。`[]byte` 传入，简单直接。
 
 ```go
-db.SAdd("tags", gedis.Buf("go"), gedis.Buf("redis"), gedis.Buf("database"))
-db.SAdd("tags", gedis.Buf("go")) // 0 (已存在)
+db.SAdd("tags", []byte("go"), []byte("redis"), []byte("database"))
+db.SAdd("tags", []byte("go")) // 0 (已存在)
 ```
 
-### `SRem(key string, members ...*PooledBuffer) int`
+### `SAddBuffer(key string, members ...*PooledBuffer) int`
+
+入参使用 `*PooledBuffer` 避免堆分配。
+
+```go
+pb1 := gedis.Buf("go")
+pb2 := gedis.Buf("redis")
+db.SAddBuffer("tags", pb1, pb2)
+pb1.Close()
+pb2.Close()
+```
+
+### `SRem(key string, members ...[]byte) int`
 
 从集合中删除一个或多个成员。
 
 ```go
-removed := db.SRem("tags", gedis.Buf("database")) // 1
+removed := db.SRem("tags", []byte("database")) // 1
 ```
 
-### `SIsMember(key string, member *PooledBuffer) bool`
+### `SRemBuffer(key string, members ...*PooledBuffer) int`
+
+入参使用 `*PooledBuffer` 避免堆分配。
+
+### `SIsMember(key string, member []byte) bool`
 
 检查指定成员是否在集合中。
 
 ```go
-isMember := db.SIsMember("tags", gedis.Buf("go")) // true
+isMember := db.SIsMember("tags", []byte("go")) // true
 ```
 
-### `SMembers(key string) []*PooledBuffer`
+### `SIsMemberBuffer(key string, member *PooledBuffer) bool`
 
-获取集合中所有成员。
+入参使用 `*PooledBuffer` 避免堆分配。
+
+### `SMembers(key string) *ZSlices`
+
+获取集合中所有成员。返回 `*ZSlices`，遍历后须 `zs.Close()`。
 
 ```go
 members := db.SMembers("tags")
-for _, m := range members {
-    fmt.Println(m.String())
-    m.Close()
+for i := 0; i < members.Len(); i++ {
+    fmt.Println(string(members.Get(i)))
 }
+members.Close()
 ```
 
 ### `SCard(key string) int`
@@ -525,69 +622,88 @@ for _, m := range members {
 count := db.SCard("tags")
 ```
 
-### `SInter(keys ...string) []*PooledBuffer`
+### `SInter(keys ...string) *ZSlices`
 
-获取多个集合的交集。
+获取多个集合的交集。返回 `*ZSlices`，遍历后须 `zs.Close()`。
 
 ```go
-db.SAdd("set1", gedis.Buf("a"), gedis.Buf("b"), gedis.Buf("c"))
-db.SAdd("set2", gedis.Buf("b"), gedis.Buf("c"), gedis.Buf("d"))
+db.SAdd("set1", []byte("a"), []byte("b"), []byte("c"))
+db.SAdd("set2", []byte("b"), []byte("c"), []byte("d"))
 result := db.SInter("set1", "set2") // ["b", "c"]
-for _, m := range result {
-    fmt.Println(m.String())
-    m.Close()
+for i := 0; i < result.Len(); i++ {
+    fmt.Println(string(result.Get(i)))
 }
+result.Close()
 ```
 
-### `SUnion(keys ...string) []*PooledBuffer`
+### `SUnion(keys ...string) *ZSlices`
 
-获取多个集合的并集。
+获取多个集合的并集。返回 `*ZSlices`，遍历后须 `zs.Close()`。
 
 ```go
-db.SAdd("set1", gedis.Buf("a"), gedis.Buf("b"))
-db.SAdd("set2", gedis.Buf("b"), gedis.Buf("c"))
+db.SAdd("set1", []byte("a"), []byte("b"))
+db.SAdd("set2", []byte("b"), []byte("c"))
 result := db.SUnion("set1", "set2") // ["a", "b", "c"]
-for _, m := range result {
-    m.Close()
+for i := 0; i < result.Len(); i++ {
+    fmt.Println(string(result.Get(i)))
 }
+result.Close()
 ```
 
 ---
 
 ## 有序集合
 
-### `ZAdd(key string, score float64, member *PooledBuffer) int`
+### `ZAdd(key string, score float64, member []byte) int`
 
-向有序集合中添加成员及其分数。
+向有序集合中添加成员及其分数。`[]byte` 传入，简单直接。
 
 ```go
-db.ZAdd("leaderboard", 1000, gedis.Buf("Alice"))
-db.ZAdd("leaderboard", 850, gedis.Buf("Bob"))
-db.ZAdd("leaderboard", 950, gedis.Buf("Charlie"))
+db.ZAdd("leaderboard", 1000, []byte("Alice"))
+db.ZAdd("leaderboard", 850, []byte("Bob"))
+db.ZAdd("leaderboard", 950, []byte("Charlie"))
 ```
 
-### `ZRem(key string, member *PooledBuffer) bool`
+### `ZAddBuffer(key string, score float64, member *PooledBuffer) int`
+
+入参使用 `*PooledBuffer` 避免堆分配。
+
+```go
+pb := gedis.Buf("Alice")
+db.ZAddBuffer("leaderboard", 1000, pb)
+pb.Close()
+```
+
+### `ZRem(key string, member []byte) bool`
 
 从有序集合中删除指定成员。
 
 ```go
-deleted := db.ZRem("leaderboard", gedis.Buf("Bob")) // true
+deleted := db.ZRem("leaderboard", []byte("Bob")) // true
 ```
 
-### `ZScore(key string, member *PooledBuffer) (float64, bool)`
+### `ZRemBuffer(key string, member *PooledBuffer) bool`
+
+入参使用 `*PooledBuffer` 避免堆分配。
+
+### `ZScore(key string, member []byte) (float64, bool)`
 
 获取有序集合中指定成员的分数。
 
 ```go
-score, ok := db.ZScore("leaderboard", gedis.Buf("Alice"))
+score, ok := db.ZScore("leaderboard", []byte("Alice"))
 if ok {
     fmt.Printf("Score: %.0f\n", score) // 1000
 }
 ```
 
-### `ZRange(key string, start, stop int) ZSlices`
+### `ZScoreBuffer(key string, member *PooledBuffer) (float64, bool)`
 
-获取有序集合中指定排名范围的成员，返回零分配 ZSlices 视图。
+入参使用 `*PooledBuffer` 避免堆分配。
+
+### `ZRange(key string, start, stop int) *ZSlices`
+
+获取有序集合中指定排名范围的成员，返回零分配 `*ZSlices` 视图。
 
 ```go
 members := db.ZRange("leaderboard", 0, -1)
@@ -619,16 +735,16 @@ for i := 0; i < names.Len(); i++ {
 names.Close()
 ```
 
-### `ZRangeByScore(key string, min, max float64) []*PooledBuffer`
+### `ZRangeByScore(key string, min, max float64) *ZSlices`
 
-获取分数在 `[min, max]` 范围内的成员。
+获取分数在 `[min, max]` 范围内的成员。返回 `*ZSlices`，遍历后须 `zs.Close()`。
 
 ```go
 members := db.ZRangeByScore("leaderboard", 900, 1100)
-for _, m := range members {
-    fmt.Println(m.String())
-    m.Close()
+for i := 0; i < members.Len(); i++ {
+    fmt.Println(string(members.Get(i)))
 }
+members.Close()
 ```
 
 ### `ZRemRangeByScore(key string, min, max float64) int`
@@ -903,23 +1019,37 @@ deleted := db.TSDel("cpu:usage", 1000, 1005)
 db.BFReserve("bf", 0.01, 100000)
 ```
 
-#### `BFAdd(key string, item *PooledBuffer) bool`
+#### `BFAdd(key string, item []byte) bool`
 
-添加元素到布隆过滤器。
+添加元素到布隆过滤器。`[]byte` 传入，简单直接。
 
 ```go
-isNew := db.BFAdd("bf", gedis.Buf("apple"))   // true
-isNew = db.BFAdd("bf", gedis.Buf("apple"))    // false
+isNew := db.BFAdd("bf", []byte("apple"))   // true
+isNew = db.BFAdd("bf", []byte("apple"))    // false
 ```
 
-#### `BFExists(key string, item *PooledBuffer) bool`
+#### `BFAddBuffer(key string, item *PooledBuffer) bool`
+
+入参使用 `*PooledBuffer` 避免堆分配。
+
+```go
+pb := gedis.Buf("apple")
+isNew := db.BFAddBuffer("bf", pb)
+pb.Close()
+```
+
+#### `BFExists(key string, item []byte) bool`
 
 检查元素是否可能存在。
 
 ```go
-exists := db.BFExists("bf", gedis.Buf("apple"))  // true
-exists = db.BFExists("bf", gedis.Buf("grape"))   // false (一定不存在)
+exists := db.BFExists("bf", []byte("apple"))  // true
+exists = db.BFExists("bf", []byte("grape"))   // false (一定不存在)
 ```
+
+#### `BFExistsBuffer(key string, item *PooledBuffer) bool`
+
+入参使用 `*PooledBuffer` 避免堆分配。
 
 ### 布谷鸟过滤器
 
@@ -931,30 +1061,42 @@ exists = db.BFExists("bf", gedis.Buf("grape"))   // false (一定不存在)
 db.CFReserve("cf", 1024)
 ```
 
-#### `CFAdd(key string, item *PooledBuffer) bool`
+#### `CFAdd(key string, item []byte) bool`
 
-添加元素。
+添加元素。`[]byte` 传入，简单直接。
 
 ```go
-ok := db.CFAdd("cf", gedis.Buf("go"))    // true
-ok = db.CFAdd("cf", gedis.Buf("go"))     // false (已存在)
+ok := db.CFAdd("cf", []byte("go"))    // true
+ok = db.CFAdd("cf", []byte("go"))     // false (已存在)
 ```
 
-#### `CFDel(key string, item *PooledBuffer) bool`
+#### `CFAddBuffer(key string, item *PooledBuffer) bool`
+
+入参使用 `*PooledBuffer` 避免堆分配。
+
+#### `CFDel(key string, item []byte) bool`
 
 删除元素。
 
 ```go
-deleted := db.CFDel("cf", gedis.Buf("go"))   // true
+deleted := db.CFDel("cf", []byte("go"))   // true
 ```
 
-#### `CFExists(key string, item *PooledBuffer) bool`
+#### `CFDelBuffer(key string, item *PooledBuffer) bool`
+
+入参使用 `*PooledBuffer` 避免堆分配。
+
+#### `CFExists(key string, item []byte) bool`
 
 检查元素是否存在。
 
 ```go
-exists := db.CFExists("cf", gedis.Buf("rust")) // true
+exists := db.CFExists("cf", []byte("rust")) // true
 ```
+
+#### `CFExistsBuffer(key string, item *PooledBuffer) bool`
+
+入参使用 `*PooledBuffer` 避免堆分配。
 
 ### Count-Min Sketch
 
@@ -966,22 +1108,30 @@ exists := db.CFExists("cf", gedis.Buf("rust")) // true
 db.CMSInitByDim("cms", 100, 5)
 ```
 
-#### `CMSIncrBy(key string, item *PooledBuffer, inc int) int`
+#### `CMSIncrBy(key string, item []byte, inc int) int`
 
-增加计数。
+增加计数。`[]byte` 传入，简单直接。
 
 ```go
-count := db.CMSIncrBy("cms", gedis.Buf("item_a"), 3) // 3
-count = db.CMSIncrBy("cms", gedis.Buf("item_a"), 2)  // 5
+count := db.CMSIncrBy("cms", []byte("item_a"), 3) // 3
+count = db.CMSIncrBy("cms", []byte("item_a"), 2)  // 5
 ```
 
-#### `CMSQuery(key string, items ...*PooledBuffer) []int`
+#### `CMSIncrByBuffer(key string, item *PooledBuffer, inc int) int`
+
+入参使用 `*PooledBuffer` 避免堆分配。
+
+#### `CMSQuery(key string, items ...[]byte) []int`
 
 查询计数。
 
 ```go
-counts := db.CMSQuery("cms", gedis.Buf("item_a"), gedis.Buf("item_b"))
+counts := db.CMSQuery("cms", []byte("item_a"), []byte("item_b"))
 ```
+
+#### `CMSQueryBuffer(key string, items ...*PooledBuffer) []int`
+
+入参使用 `*PooledBuffer` 避免堆分配。
 
 ### Top-K
 
@@ -1001,12 +1151,15 @@ db.TopKReserve("topk", 3)
 db.TopKAdd("topk", "a", "b", "a", "c", "b", "a")
 ```
 
-#### `TopKList(key string) []string`
+#### `TopKList(key string) []TopKItem`
 
-获取当前 Top-K 元素列表。
+获取当前 Top-K 元素列表，每项包含 `Item`（字符串）和 `Count`（计数）。
 
 ```go
 items := db.TopKList("topk")
+for _, item := range items {
+    fmt.Printf("%s: %d\n", item.Item, item.Count)
+}
 ```
 
 ---
@@ -1041,48 +1194,55 @@ val, _ = db.JsonGet("doc", "$")     // 整个文档
 db.JsonDel("doc", "age")
 ```
 
-### `JsonStrLen(key, path string) (int, error)`
+### `JsonArrAppend(key, path string, values ...interface{}) error`
 
-获取 JSON 字段的字符串长度。
+向 JSON 数组路径追加元素。
 
-### `JsonArrLen(key, path string) (int, error)`
+```go
+db.JsonSet("doc", "list", []interface{}{1, 2, 3})
+db.JsonArrAppend("doc", "list", 4, 5)
+```
 
-获取 JSON 数组的长度。
+### `JsonObjLen(key, path string) (int, error)`
+
+获取 JSON 对象的字段数量。
+
+```go
+n, _ := db.JsonObjLen("doc", "$")
+```
 
 ---
 
 ## 全文搜索
 
-### `FtCreate(index string, schema map[string]FtFieldType) error`
+### `FtCreate(index string, schema map[string]string)`
 
-创建全文索引。
+创建全文索引。schema 为字段名到类型的映射。
 
 ```go
-db.FtCreate("idx:books", map[string]FtFieldType{
-    "title": FtText,
-    "author": FtTag,
-    "price": FtNumeric,
+db.FtCreate("idx:books", map[string]string{
+    "title":  "text",
+    "author": "tag",
 })
 ```
 
-### `FtAdd(index string, docID string, fields map[string]interface{}) error`
+### `FtAdd(index string, docID string, fields map[string]string)`
 
-添加文档。
+添加文档。fields 为字段名到值的映射。
 
 ```go
-db.FtAdd("idx:books", "book1", map[string]interface{}{
+db.FtAdd("idx:books", "book1", map[string]string{
     "title":  "Go Programming",
     "author": "Alice",
-    "price":  29.99,
 })
 ```
 
-### `FtSearch(index, query string) *ZSlices`
+### `FtSearch(index, query string, limit int) *ZSlices`
 
-搜索文档（返回匹配的文档 ID 列表）。
+搜索文档，返回匹配的文档 ID 列表（`*ZSlices`）。limit 为最大返回数量，0 表示不限制。遍历后须 `zs.Close()`。
 
 ```go
-results := db.FtSearch("idx:books", "programming")
+results := db.FtSearch("idx:books", "programming", 10)
 for i := 0; i < results.Len(); i++ {
     fmt.Println(string(results.Get(i)))
 }
@@ -1093,56 +1253,67 @@ results.Close()
 
 ## 图查询
 
-### `GraphAddNode(label string, nodeID string, properties map[string]interface{}) error`
+图查询通过 `GraphQuery` 方法使用 Cypher 风格语法执行。内部节点和边通过 `GraphNode`、`GraphEdge`、`GraphResult` 类型表示。
 
-添加图节点。
+### `GraphQuery(graphName, cypher string) ([]GraphResult, error)`
 
-```go
-db.GraphAddNode("Person", "Alice", map[string]interface{}{
-    "age": 30,
-})
-```
-
-### `GraphAddEdge(label string, fromNodeID, toNodeID string, properties map[string]interface{}) error`
-
-添加图边。
+执行 Cypher 风格图查询，返回匹配的图结果列表。
 
 ```go
-db.GraphAddEdge("KNOWS", "Alice", "Bob", nil)
+results, _ := db.GraphQuery("social", "MATCH (a:Person)-[:KNOWS]->(b:Person)")
+for _, r := range results {
+    for _, node := range r.Nodes {
+        fmt.Printf("Node: %s, Labels: %v\n", node.ID, node.Labels)
+    }
+    for _, edge := range r.Edges {
+        fmt.Printf("Edge: %s -> %s [%s]\n", edge.Source, edge.Target, edge.Type)
+    }
+}
 ```
 
-### `GraphGetNode(label, nodeID string) (map[string]interface{}, error)`
+### 类型定义
 
-获取图节点。
-
-```go
-node, _ := db.GraphGetNode("Person", "Alice")
-```
-
-### `GraphGetNeighbors(nodeID string) ([]string, error)`
-
-获取节点的邻居。
-
-```go
-neighbors, _ := db.GraphGetNeighbors("Alice")
-```
+| 类型 | 字段 | 说明 |
+|------|------|------|
+| `GraphNode` | `ID string`, `Labels []string`, `Properties map[string]string` | 图节点 |
+| `GraphEdge` | `ID string`, `Type string`, `Source string`, `Target string`, `Properties map[string]string` | 图边 |
+| `GraphResult` | `Nodes []GraphNode`, `Edges []GraphEdge` | 查询结果 |
 
 ---
 
 ## 速率限制
 
-### `Throttle(key string, capacity, refillRate int, refillIntervalMs int64) ThrottleResult`
+### `Throttle(key string, maxBurst, rate int64, period int64) ThrottleResult`
 
-滑动窗口速率限制器。返回是否允许通过、剩余容量、下次重试时间等信息。
+令牌桶速率限制器。返回是否允许通过、剩余令牌、重试等待时间等信息。所有参数均为 `int64`。
 
 ```go
 result := db.Throttle("api:login", 10, 1, 1000)
 if result.Allowed {
     fmt.Printf("Allowed, remaining: %d\n", result.Remaining)
 } else {
-    fmt.Printf("Blocked, retry after %d ms\n", result.RetryAfterMs)
+    fmt.Printf("Blocked, retry after %d ms\n", result.RetryAfter)
 }
 ```
+
+### `CellReset(key string)`
+
+重置令牌桶，将令牌数恢复至满容量。
+
+```go
+db.CellReset("api:login")
+```
+
+### 类型定义
+
+`ThrottleResult` 结构：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `Allowed` | `bool` | 是否允许通过 |
+| `Remaining` | `int64` | 剩余令牌数 |
+| `RetryAfter` | `int64` | 下次重试等待毫秒数 |
+| `ResetAt` | `int64` | 令牌桶重置时间戳 (Unix 毫秒) |
 
 ---
 
@@ -1158,13 +1329,23 @@ Gedis 暴露了底层数据结构类型，供高级用户直接使用：
 | `Skiplist` | 跳表，内部使用 |
 | `Intset` | 整数集合，内部使用 |
 | `PooledBuffer` | 池化可复用缓冲区，公共 API 传递层 |
-| `ZSlices` | 零分配视图（ZRange 返回） |
+| `ZSlices` | 零分配视图（ZRange/LRange/SMembers/HGetAll 返回） |
+| `TopKItem` | TopK 元素，包含 `Item string` 和 `Count int` |
+| `TSPoint` | 时间序列数据点，包含 `Timestamp int64` 和 `Value float64` |
+| `StreamEntry` | 流条目，包含 `ID string` 和 `Fields map[string]*PooledBuffer` |
+| `ThrottleResult` | 限流结果，包含 `Allowed/Remaining/RetryAfter/ResetAt` |
+| `GraphNode` | 图节点，包含 `ID/Labels/Properties` |
+| `GraphEdge` | 图边，包含 `ID/Type/Source/Target/Properties` |
+| `GraphResult` | 图查询结果，包含 `Nodes/Edges` |
 
 ### PooledBuffer 使用模式
 
 ```go
 // 从字符串创建缓冲区
 pb := gedis.Buf("hello world")
+
+// 从已有 []byte 创建缓冲区
+pb2 := gedis.BufFromBytes(existingBytes)
 
 // 获取底层字节
 data := pb.Bytes()
@@ -1175,9 +1356,10 @@ copy(buf, pb.Bytes())
 
 // 使用完毕后归还池中
 pb.Close()
+pb2.Close()
 
 // 从默认池获取指定最小容量的空缓冲区
-pb2 := gedis.NewBuf(4096)
-pb2.WriteString("large data")
-pb2.Close()
+pb3 := gedis.NewBuf(4096)
+pb3.WriteString("large data")
+pb3.Close()
 ```

@@ -110,6 +110,7 @@ func (db *RedisDB) SAddBuffer(key string, members ...*PooledBuffer) int {
 				added++
 			}
 		}
+		innerDict.StoreMeta(dataOff)
 		return added
 	}
 
@@ -168,6 +169,7 @@ func (db *RedisDB) SRemBuffer(key string, members ...*PooledBuffer) int {
 				removed++
 			}
 		}
+		innerDict.StoreMeta(dataOff)
 		return removed
 	}
 

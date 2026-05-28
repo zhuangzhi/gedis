@@ -187,6 +187,7 @@ func (db *RedisDB) CFReserve(key string, capacity int) {
 	if numBuckets < 1 {
 		numBuckets = 1
 	}
+	numBuckets = nextPowerOf2(numBuckets)
 
 	cfSize := 4 + numBuckets*cfBucketSize*cfFingerprintSize
 	cfOff := db.arena.Alloc(cfSize)
@@ -621,4 +622,18 @@ func (db *RedisDB) TopKList(key string) []TopKItem {
 	}
 
 	return result
+}
+
+func nextPowerOf2(n int) int {
+	if n <= 1 {
+		return 1
+	}
+	n--
+	n |= n >> 1
+	n |= n >> 2
+	n |= n >> 4
+	n |= n >> 8
+	n |= n >> 16
+	n |= n >> 32
+	return n + 1
 }

@@ -38,11 +38,12 @@ func (db *RedisDB) HSetBuffer(key string, field string, value *PooledBuffer) int
 	defer db.mu.Unlock()
 
 	keyBytes := []byte(key)
+	fieldBytes := []byte(field)
 	headOff, ok := db.dict.Get(keyBytes)
 
 	if !ok {
 		zlOff := ziplistNew(db.arena)
-		zlOff = ziplistInsert(db.arena, zlOff, []byte(field), false)
+		zlOff = ziplistInsert(db.arena, zlOff, fieldBytes, false)
 		zlOff = ziplistInsert(db.arena, zlOff, value.Bytes(), false)
 		headOff = db.NewObject(ObjHash, ObjEncodingZiplist, zlOff)
 		db.dict.Set(keyBytes, headOff)
@@ -57,8 +58,7 @@ func (db *RedisDB) HSetBuffer(key string, field string, value *PooledBuffer) int
 		n := ziplistLen(db.arena, zlOff)
 		pos := zlOff + ziplistHeaderSize
 		for i := 0; i < n; i += 2 {
-			f := ziplistReadEntryData(db.arena, pos)
-			if string(f) == field {
+			if ziplistEntryDataEquals(db.arena, pos, fieldBytes) {
 				zlOff = ziplistDelete(db.arena, zlOff, i+1)
 				zlOff = ziplistInsertAt(db.arena, zlOff, i+1, value.Bytes())
 				db.ObjectSetDataOffset(headOff, zlOff)
@@ -68,7 +68,7 @@ func (db *RedisDB) HSetBuffer(key string, field string, value *PooledBuffer) int
 			pos += ziplistEntryTotalSize(db.arena, pos)
 		}
 
-		zlOff = ziplistInsert(db.arena, zlOff, []byte(field), false)
+		zlOff = ziplistInsert(db.arena, zlOff, fieldBytes, false)
 		zlOff = ziplistInsert(db.arena, zlOff, value.Bytes(), false)
 		db.ObjectSetDataOffset(headOff, zlOff)
 		return 1
@@ -271,29 +271,71 @@ func ziplistInsertAt(arena *Arena, zlOff int, index int, data []byte) int {
 		return ziplistInsert(arena, zlOff, data, false)
 	}
 
-	oldZlOff := zlOff
+	oldSize := ziplistTotalBytes(arena, zlOff)
+	oldTail := ziplistTailOffset(arena, zlOff)
 
-	relInsertPos := ziplistHeaderSize
+	insertOff := zlOff + ziplistHeaderSize
 	for i := 0; i < index; i++ {
-		relInsertPos += ziplistEntryTotalSize(arena, oldZlOff+relInsertPos)
+		insertOff += ziplistEntryTotalSize(arena, insertOff)
 	}
 
-	tmpArena := NewArena(256)
-	tmpZl := ziplistNew(tmpArena)
-	for i := 0; i < index; i++ {
-		entry := ziplistGet(arena, oldZlOff, i)
-		tmpZl = ziplistInsert(tmpArena, tmpZl, entry, false)
-	}
-	tmpZl = ziplistInsert(tmpArena, tmpZl, data, false)
-	for i := index; i < n; i++ {
-		entry := ziplistGet(arena, oldZlOff, i)
-		tmpZl = ziplistInsert(tmpArena, tmpZl, entry, false)
+	prevLen := 0
+	if index > 0 {
+		prevEntryOff := zlOff + ziplistHeaderSize
+		for i := 0; i < index-1; i++ {
+			prevEntryOff += ziplistEntryTotalSize(arena, prevEntryOff)
+		}
+		prevLen = ziplistEntryTotalSize(arena, prevEntryOff)
 	}
 
-	newSize := tmpZl + ziplistTotalBytes(tmpArena, tmpZl)
-	newData := tmpArena.ReadBytes(0, newSize)
-	newOff := arena.AllocBytes(newData)
+	entrySize := ziplistEntrySize(prevLen, data)
+	newSize := oldSize + entrySize
 
-	arena.Free(oldZlOff)
+	headerSize := ziplistHeaderSize
+	prefixSize := insertOff - (zlOff + headerSize)
+	suffixSize := oldSize - headerSize - prefixSize - 1
+
+	newOff := arena.Alloc(newSize)
+
+	arena.WriteBytes(newOff, arena.GetSlice(zlOff, headerSize))
+
+	pos := newOff + headerSize
+	if prefixSize > 0 {
+		arena.WriteBytes(pos, arena.GetSlice(zlOff+headerSize, prefixSize))
+		pos += prefixSize
+	}
+
+	pos += ziplistWriteEntry(arena, pos, prevLen, data)
+
+	if suffixSize > 0 {
+		firstOff := insertOff
+		_, oldPrevSize := ziplistEntryPrevLen(arena, firstOff)
+		firstTotal := ziplistEntryTotalSize(arena, firstOff)
+		firstDataOff := firstOff + oldPrevSize
+		firstDataSize := firstTotal - oldPrevSize
+
+		pos += ziplistWritePrevLen(arena, pos, entrySize)
+		arena.WriteBytes(pos, arena.GetSlice(firstDataOff, firstDataSize))
+		pos += firstDataSize
+
+		remainingOff := firstOff + firstTotal
+		remainingSize := suffixSize - firstTotal
+		if remainingSize > 0 {
+			arena.WriteBytes(pos, arena.GetSlice(remainingOff, remainingSize))
+			pos += remainingSize
+		}
+	}
+
+	arena.WriteByte(pos, ziplistEndByte)
+
+	ziplistSetTotalBytes(arena, newOff, newSize)
+	ziplistSetNumEntries(arena, newOff, n+1)
+	if index == n {
+		ziplistSetTailOffset(arena, newOff, ziplistHeaderSize+prefixSize)
+	} else {
+		ziplistSetTailOffset(arena, newOff, oldTail+entrySize)
+	}
+
+	arena.Free(zlOff)
 	return newOff
 }
