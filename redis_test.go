@@ -5267,3 +5267,103 @@ func TestFlushAllClearsExpiry(t *testing.T) {
 		t.Fatal("expected all keys to be deleted after FlushAll")
 	}
 }
+
+func TestGetExpiredKeyReturnsNil(t *testing.T) {
+	db := New()
+	db.Set("key", []byte("value"))
+	db.Expire("key", 1)
+
+	time.Sleep(1100 * time.Millisecond)
+
+	val, ok := db.Get("key")
+	if ok || val != nil {
+		t.Fatalf("expected expired key to return nil, got ok=%v, val=%v", ok, val)
+	}
+}
+
+func TestSetExSetsExpiration(t *testing.T) {
+	db := New()
+	db.SetEx("key", 10, []byte("value"))
+
+	ttl := db.TTL("key")
+	if ttl <= 0 || ttl > 10 {
+		t.Fatalf("expected TTL > 0 and <= 10, got %d", ttl)
+	}
+}
+
+func TestPsetExSetsExpiration(t *testing.T) {
+	db := New()
+	db.PsetEx("key", 5000, []byte("value"))
+
+	pttl := db.PTTL("key")
+	if pttl <= 0 || pttl > 5000 {
+		t.Fatalf("expected PTTL > 0 and <= 5000, got %d", pttl)
+	}
+}
+
+func TestSetNXOnExpiredKeySucceeds(t *testing.T) {
+	db := New()
+	db.Set("key", []byte("value"))
+	db.Expire("key", 1)
+
+	time.Sleep(1100 * time.Millisecond)
+
+	pb := BufFromBytes([]byte("newvalue"))
+	ok := db.SetNX("key", pb)
+	pb.Close()
+	if !ok {
+		t.Fatal("expected SetNX on expired key to succeed")
+	}
+
+	val, _ := db.Get("key")
+	if val.String() != "newvalue" {
+		t.Fatalf("expected 'newvalue', got '%s'", val.String())
+	}
+	val.Close()
+}
+
+func TestMSetNXOnExpiredKeySucceeds(t *testing.T) {
+	db := New()
+	db.Set("key1", []byte("value1"))
+	db.Set("key2", []byte("value2"))
+	db.Expire("key1", 1)
+
+	time.Sleep(1100 * time.Millisecond)
+
+	pb1 := BufFromBytes([]byte("newvalue1"))
+	pb2 := BufFromBytes([]byte("newvalue2"))
+	inserted := db.MSetNX(map[string]*PooledBuffer{
+		"key1": pb1,
+		"key2": pb2,
+	})
+	pb1.Close()
+	pb2.Close()
+	if inserted != 1 {
+		t.Fatalf("expected 1 key inserted, got %d", inserted)
+	}
+
+	val1, _ := db.Get("key1")
+	if val1.String() != "newvalue1" {
+		t.Fatalf("expected 'newvalue1', got '%s'", val1.String())
+	}
+	val1.Close()
+
+	val2, _ := db.Get("key2")
+	if val2.String() != "value2" {
+		t.Fatalf("expected 'value2' (unchanged), got '%s'", val2.String())
+	}
+	val2.Close()
+}
+
+func TestGetDelOnExpiredKeyReturnsNil(t *testing.T) {
+	db := New()
+	db.Set("key", []byte("value"))
+	db.Expire("key", 1)
+
+	time.Sleep(1100 * time.Millisecond)
+
+	val, ok := db.GetDel("key")
+	if ok || val != nil {
+		t.Fatalf("expected GetDel on expired key to return nil, got ok=%v, val=%v", ok, val)
+	}
+}

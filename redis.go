@@ -30,10 +30,11 @@ import (
 // RedisDB 是嵌入式 Redis-like 内存数据库的主结构。
 // 所有数据存储在 Arena 中，通过 Dict 索引，sync.RWMutex 保证并发安全。
 type RedisDB struct {
-	arena  *Arena
-	dict   *Dict
-	expiry *Dict
-	mu     sync.RWMutex
+	arena         *Arena
+	dict          *Dict
+	expiry        *Dict
+	lastWALOffset int64
+	mu            sync.RWMutex
 }
 
 // New 创建一个新的 RedisDB 实例。
@@ -108,6 +109,21 @@ func (db *RedisDB) deleteExpiredKey(keyBytes []byte, headOff int) {
 	db.FreeObject(headOff)
 	db.dict.Del(keyBytes)
 	db.expiry.Del(keyBytes)
+}
+
+// getObject 获取 key 对应的对象头偏移量，同时处理过期键的惰性删除。
+// 返回 (headOff, ok)：headOff 为对象头偏移，ok 为 false 表示 key 不存在或已过期。
+func (db *RedisDB) getObject(key string) (int, bool) {
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+	if !ok {
+		return 0, false
+	}
+	if db.isExpired(keyBytes, headOff) {
+		db.deleteExpiredKey(keyBytes, headOff)
+		return 0, false
+	}
+	return headOff, true
 }
 
 // currentTimeMs 返回当前时间戳（毫秒）。

@@ -232,3 +232,16 @@ func fnv32Byte(b byte) uint32 {
 	h *= 16777619
 	return h
 }
+
+func (d *Dict) Len() int {
+	return d.used
+}
+
+func NewDictFromArena(arena *Arena, used int) *Dict {
+	return &Dict{
+		arena: arena,
+		table: arena.Alloc(dictInitSize * dictSlotSize),
+		size:  dictInitSize,
+		used:  used,
+	}
+}

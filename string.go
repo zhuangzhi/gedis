@@ -48,11 +48,16 @@ func (db *RedisDB) SetBuffer(key string, value *PooledBuffer) {
 
 // Get 获取 key 的值。返回 *PooledBuffer，调用方用完后必须 pb.Close()。
 func (db *RedisDB) Get(key string) (*PooledBuffer, bool) {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
+	db.mu.Lock()
+	defer db.mu.Unlock()
 
-	headOff, ok := db.dict.Get([]byte(key))
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
 	if !ok {
+		return nil, false
+	}
+	if db.isExpired(keyBytes, headOff) {
+		db.deleteExpiredKey(keyBytes, headOff)
 		return nil, false
 	}
 
@@ -140,11 +145,16 @@ func (db *RedisDB) AppendBuffer(key string, value *PooledBuffer) int {
 
 // GetRange 返回 key 值的子字符串 [start, end]。返回 *PooledBuffer。
 func (db *RedisDB) GetRange(key string, start, end int) (*PooledBuffer, bool) {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
+	db.mu.Lock()
+	defer db.mu.Unlock()
 
-	headOff, ok := db.dict.Get([]byte(key))
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
 	if !ok {
+		return nil, false
+	}
+	if db.isExpired(keyBytes, headOff) {
+		db.deleteExpiredKey(keyBytes, headOff)
 		return nil, false
 	}
 
@@ -426,13 +436,17 @@ func (db *RedisDB) MSetNX(keyValues map[string]*PooledBuffer) int {
 	inserted := 0
 	for key, value := range keyValues {
 		keyBytes := []byte(key)
-		_, ok := db.dict.Get(keyBytes)
+		headOff, ok := db.dict.Get(keyBytes)
 		if ok {
-			continue
+			if db.isExpired(keyBytes, headOff) {
+				db.deleteExpiredKey(keyBytes, headOff)
+			} else {
+				continue
+			}
 		}
 
 		valOff := db.arena.AllocBytes(value.Bytes())
-		headOff := db.NewObject(ObjString, ObjEncodingRaw, valOff)
+		headOff = db.NewObject(ObjString, ObjEncodingRaw, valOff)
 		db.dict.Set(keyBytes, headOff)
 		inserted++
 	}
@@ -444,13 +458,17 @@ func (db *RedisDB) SetNX(key string, value *PooledBuffer) bool {
 	defer db.mu.Unlock()
 
 	keyBytes := []byte(key)
-	_, ok := db.dict.Get(keyBytes)
+	headOff, ok := db.dict.Get(keyBytes)
 	if ok {
-		return false
+		if db.isExpired(keyBytes, headOff) {
+			db.deleteExpiredKey(keyBytes, headOff)
+		} else {
+			return false
+		}
 	}
 
 	valOff := db.arena.AllocBytes(value.Bytes())
-	headOff := db.NewObject(ObjString, ObjEncodingRaw, valOff)
+	headOff = db.NewObject(ObjString, ObjEncodingRaw, valOff)
 	db.dict.Set(keyBytes, headOff)
 	return true
 }
@@ -477,6 +495,11 @@ func (db *RedisDB) SetExBuffer(key string, seconds int, value *PooledBuffer) {
 	valOff := db.arena.AllocBytes(value.Bytes())
 	headOff := db.NewObject(ObjString, ObjEncodingRaw, valOff)
 	db.dict.Set(keyBytes, headOff)
+
+	expTime := currentTimeMs() + int64(seconds)*1000
+	expTimeOff := db.arena.Alloc(8)
+	db.arena.WriteUint64(expTimeOff, uint64(expTime))
+	db.expiry.Set(keyBytes, expTimeOff)
 }
 
 func (db *RedisDB) PsetEx(key string, milliseconds int64, value []byte) {
@@ -493,14 +516,24 @@ func (db *RedisDB) PsetExBuffer(key string, milliseconds int64, value *PooledBuf
 	valOff := db.arena.AllocBytes(value.Bytes())
 	headOff := db.NewObject(ObjString, ObjEncodingRaw, valOff)
 	db.dict.Set(keyBytes, headOff)
+
+	expTime := currentTimeMs() + milliseconds
+	expTimeOff := db.arena.Alloc(8)
+	db.arena.WriteUint64(expTimeOff, uint64(expTime))
+	db.expiry.Set(keyBytes, expTimeOff)
 }
 
 func (db *RedisDB) GetDel(key string) (*PooledBuffer, bool) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	headOff, ok := db.dict.Get([]byte(key))
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
 	if !ok {
+		return nil, false
+	}
+	if db.isExpired(keyBytes, headOff) {
+		db.deleteExpiredKey(keyBytes, headOff)
 		return nil, false
 	}
 
@@ -526,7 +559,8 @@ func (db *RedisDB) GetDel(key string) (*PooledBuffer, bool) {
 		return nil, false
 	}
 
-	db.dict.Del([]byte(key))
+	db.dict.Del(keyBytes)
+	db.expiry.Del(keyBytes)
 	db.FreeObject(headOff)
 	return pb, true
 }

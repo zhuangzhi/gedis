@@ -221,3 +221,21 @@ func (a *Arena) grow(needed int) {
 	copy(newBuf, a.buf[:a.off])
 	a.buf = newBuf
 }
+
+func (a *Arena) Size() int {
+	return a.off
+}
+
+func (a *Arena) Dump() []byte {
+	return a.buf[:a.off]
+}
+
+func LoadArena(data []byte) *Arena {
+	a := &Arena{
+		buf:  data,
+		off:  len(data),
+		free: make([]int, 0),
+		page: arenaDefaultPage,
+	}
+	return a
+}
