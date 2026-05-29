@@ -3,8 +3,10 @@ package gedis
 import (
 	"encoding/binary"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // ============================================================================
@@ -1011,6 +1013,128 @@ func TestLIndexNonexistent(t *testing.T) {
 }
 
 // ============================================================================
+// LTrim / LMove
+// ============================================================================
+
+func TestLTrim(t *testing.T) {
+	db := New()
+	db.LPush("l", []byte("d"), []byte("c"), []byte("b"), []byte("a"))
+
+	ok := db.LTrim("l", 0, 1)
+	if !ok {
+		t.Fatal("expected trim success")
+	}
+
+	if db.LLen("l") != 2 {
+		t.Fatalf("expected 2, got %d", db.LLen("l"))
+	}
+
+	first, _ := db.LIndex("l", 0)
+	if first.String() != "a" {
+		t.Fatalf("expected first 'a', got '%s'", first.String())
+	}
+}
+
+func TestLTrimNonexistent(t *testing.T) {
+	db := New()
+	ok := db.LTrim("nonexistent", 0, 1)
+	if ok {
+		t.Fatal("expected false for nonexistent key")
+	}
+}
+
+func TestLTrimOutOfRange(t *testing.T) {
+	db := New()
+	db.LPush("l", []byte("a"), []byte("b"))
+
+	ok := db.LTrim("l", 5, 10)
+	if !ok {
+		t.Fatal("expected trim success even with out of range")
+	}
+
+	if db.LLen("l") != 0 {
+		t.Fatalf("expected 0, got %d", db.LLen("l"))
+	}
+}
+
+func TestLTrimNegativeIndices(t *testing.T) {
+	db := New()
+	db.LPush("l", []byte("e"), []byte("d"), []byte("c"), []byte("b"), []byte("a"))
+
+	ok := db.LTrim("l", 1, -1)
+	if !ok {
+		t.Fatal("expected trim success")
+	}
+
+	if db.LLen("l") != 4 {
+		t.Fatalf("expected 4, got %d", db.LLen("l"))
+	}
+}
+
+func TestLMove(t *testing.T) {
+	db := New()
+	db.LPush("src", []byte("b"), []byte("a"))
+
+	elem, ok := db.LMove("src", "dst", "LEFT", "RIGHT")
+	if !ok {
+		t.Fatal("expected move success")
+	}
+	if elem.String() != "a" {
+		t.Fatalf("expected 'a', got '%s'", elem.String())
+	}
+	elem.Close()
+
+	if db.LLen("src") != 1 {
+		t.Fatalf("expected src len 1, got %d", db.LLen("src"))
+	}
+	if db.LLen("dst") != 1 {
+		t.Fatalf("expected dst len 1, got %d", db.LLen("dst"))
+	}
+}
+
+func TestLMoveRightToLeft(t *testing.T) {
+	db := New()
+	db.LPush("src", []byte("b"), []byte("a"))
+
+	elem, ok := db.LMove("src", "dst", "RIGHT", "LEFT")
+	if !ok {
+		t.Fatal("expected move success")
+	}
+	if elem.String() != "b" {
+		t.Fatalf("expected 'b', got '%s'", elem.String())
+	}
+	elem.Close()
+
+	first, _ := db.LIndex("dst", 0)
+	if first.String() != "b" {
+		t.Fatalf("expected dst first 'b', got '%s'", first.String())
+	}
+}
+
+func TestLMoveNonexistentSrc(t *testing.T) {
+	db := New()
+	elem, ok := db.LMove("nonexistent", "dst", "LEFT", "RIGHT")
+	if ok || elem != nil {
+		t.Fatal("expected failure for nonexistent src")
+	}
+}
+
+func TestLMoveCreateDst(t *testing.T) {
+	db := New()
+	db.LPush("src", []byte("a"))
+
+	elem, ok := db.LMove("src", "dst", "LEFT", "LEFT")
+	if !ok {
+		t.Fatal("expected move success")
+	}
+	elem.Close()
+
+	if db.LLen("dst") != 1 {
+		t.Fatalf("expected dst len 1, got %d", db.LLen("dst"))
+	}
+}
+
+// ============================================================================
 // Hashes Extended
 // ============================================================================
 
@@ -1444,6 +1568,9 @@ func TestStreamXGroupCreateBadKey(t *testing.T) {
 	err := db.XGroupCreate("nonexistent", "g", "0-0")
 	if err == nil {
 		t.Fatal("expected error")
+	}
+	if err.Error() != "no such key" {
+		t.Fatalf("expected 'no such key', got '%s'", err.Error())
 	}
 }
 
@@ -2926,3 +3053,2217 @@ func TestSRemMulti(t *testing.T) {
 	}
 }
 
+// ============================================================================
+// TSAdd chunk 满时创建新 chunk
+// ============================================================================
+
+func TestTSAddChunkFull(t *testing.T) {
+	db := New()
+	for i := 0; i < 300; i++ {
+		db.TSAdd("ts", int64(i*10), float64(i))
+	}
+	points := db.TSRange("ts", 0, 3000)
+	if len(points) != 300 {
+		t.Fatalf("expected 300 points, got %d", len(points))
+	}
+}
+
+func TestTSAddManyChunks(t *testing.T) {
+	db := New()
+	for i := 0; i < 1000; i++ {
+		db.TSAdd("ts", int64(i), float64(i%100))
+	}
+	points := db.TSRange("ts", 0, 1000)
+	if len(points) != 1000 {
+		t.Fatalf("expected 1000 points, got %d", len(points))
+	}
+}
+
+func TestTSAddWithLabels(t *testing.T) {
+	db := New()
+	labels := map[string]string{"type": "sensor", "zone": "north"}
+	n := db.TSAddWithLabels("ts", 100, 1.5, labels)
+	if n != 1 {
+		t.Fatalf("expected 1, got %d", n)
+	}
+
+	retrieved := db.TSGetLabels("ts")
+	if retrieved == nil {
+		t.Fatal("expected labels, got nil")
+	}
+	if retrieved["type"] != "sensor" || retrieved["zone"] != "north" {
+		t.Fatalf("expected labels {type:sensor, zone:north}, got %v", retrieved)
+	}
+}
+
+func TestTSAddWithLabelsExisting(t *testing.T) {
+	db := New()
+	db.TSAddWithLabels("ts", 100, 1.0, map[string]string{"type": "temp"})
+	n := db.TSAddWithLabels("ts", 200, 2.0, map[string]string{"type": "humidity"})
+	if n != 2 {
+		t.Fatalf("expected 2, got %d", n)
+	}
+
+	retrieved := db.TSGetLabels("ts")
+	if retrieved["type"] != "temp" {
+		t.Fatalf("expected temp, got %s", retrieved["type"])
+	}
+}
+
+func TestTSAddWithLabelsMultiple(t *testing.T) {
+	db := New()
+	db.TSAddWithLabels("ts1", 100, 1.0, map[string]string{"sensor": "temp"})
+	db.TSAddWithLabels("ts2", 100, 2.0, map[string]string{"sensor": "humidity"})
+
+	labels1 := db.TSGetLabels("ts1")
+	labels2 := db.TSGetLabels("ts2")
+
+	if labels1["sensor"] != "temp" {
+		t.Fatalf("expected temp, got %s", labels1["sensor"])
+	}
+	if labels2["sensor"] != "humidity" {
+		t.Fatalf("expected humidity, got %s", labels2["sensor"])
+	}
+}
+
+func TestTSGetLabelsNonexistent(t *testing.T) {
+	db := New()
+	labels := db.TSGetLabels("nonexistent")
+	if labels != nil {
+		t.Fatal("expected nil for nonexistent key")
+	}
+}
+
+func TestTSGetLabelsNoLabels(t *testing.T) {
+	db := New()
+	db.TSAdd("ts", 100, 1.0)
+	labels := db.TSGetLabels("ts")
+	if labels != nil && len(labels) > 0 {
+		t.Fatalf("expected empty or nil labels, got %v", labels)
+	}
+}
+
+// ============================================================================
+// ZSlices 边界检查
+// ============================================================================
+
+func TestZSlicesLenEmpty(t *testing.T) {
+	zs := NewZSlices()
+	if zs.Len() != 0 {
+		t.Fatalf("expected 0, got %d", zs.Len())
+	}
+	zs.Close()
+}
+
+func TestZSlicesGetNegative(t *testing.T) {
+	db := New()
+	db.ZAdd("z", 1.0, []byte("a"))
+	db.ZAdd("z", 2.0, []byte("b"))
+	zs := db.ZRange("z", 0, -1)
+	if zs.Get(-1) != nil {
+		t.Fatal("expected nil for negative index")
+	}
+	zs.Close()
+}
+
+func TestZSlicesGetOutOfBounds(t *testing.T) {
+	db := New()
+	db.ZAdd("z", 1.0, []byte("a"))
+	zs := db.ZRange("z", 0, -1)
+	if zs.Get(100) != nil {
+		t.Fatal("expected nil for out of range")
+	}
+	zs.Close()
+}
+
+func TestZSlicesCloseNil(t *testing.T) {
+	var zs *ZSlices
+	if zs != nil {
+		zs.Close()
+	}
+}
+
+func TestZSlicesFinishEmpty(t *testing.T) {
+	zs := NewZSlices()
+	zs.Finish()
+	if zs.Len() != 0 {
+		t.Fatalf("expected 0, got %d", zs.Len())
+	}
+	zs.Close()
+}
+
+// ============================================================================
+// Ziplist 大 prevLen 编码 (>254)
+// ============================================================================
+
+func TestZiplistLargePrevLenEncoding(t *testing.T) {
+	db := New()
+	largeValue := make([]byte, 300)
+	for i := range largeValue {
+		largeValue[i] = 'x'
+	}
+	db.HSet("h", "f1", largeValue)
+	db.HSet("h", "f2", []byte("small"))
+
+	v, ok := db.HGet("h", "f2")
+	if !ok || v.String() != "small" {
+		t.Fatalf("expected 'small', got '%s'", v.String())
+	}
+	v.Close()
+}
+
+// ============================================================================
+// Ziplist 多字节长度编码 (64-16383)
+// ============================================================================
+
+func TestZiplistMediumLengthEncoding(t *testing.T) {
+	db := New()
+	mediumValue := make([]byte, 100)
+	for i := range mediumValue {
+		mediumValue[i] = 'y'
+	}
+	db.HSet("h", "f1", mediumValue)
+
+	v, ok := db.HGet("h", "f1")
+	if !ok || len(v.Bytes()) != 100 {
+		t.Fatalf("expected len 100, got %d", len(v.Bytes()))
+	}
+	v.Close()
+}
+
+func TestZiplistLargeLengthEncoding(t *testing.T) {
+	db := New()
+	largeValue := make([]byte, 20000)
+	for i := range largeValue {
+		largeValue[i] = 'z'
+	}
+	db.HSet("h", "f1", largeValue)
+
+	v, ok := db.HGet("h", "f1")
+	if !ok || len(v.Bytes()) != 20000 {
+		t.Fatalf("expected len 20000, got %d", len(v.Bytes()))
+	}
+	v.Close()
+}
+
+// ============================================================================
+// Ziplist 整数编码读取
+// ============================================================================
+
+func TestZiplistIntEncoding(t *testing.T) {
+	db := New()
+	db.HSet("h", "count", []byte("123"))
+	v, ok := db.HGet("h", "count")
+	if !ok || v.String() != "123" {
+		t.Fatalf("expected '123', got '%s'", v.String())
+	}
+	v.Close()
+}
+
+// ============================================================================
+// ZRangeIter 遍历
+// ============================================================================
+
+func TestZRangeIterFull(t *testing.T) {
+	db := New()
+	db.ZAdd("z", 1.0, []byte("a"))
+	db.ZAdd("z", 2.0, []byte("b"))
+	db.ZAdd("z", 3.0, []byte("c"))
+
+	count := 0
+	db.ZRangeIter("z", 0, -1, func(member []byte) {
+		count++
+	})
+	if count != 3 {
+		t.Fatalf("expected 3, got %d", count)
+	}
+}
+
+func TestZRangeIterRange(t *testing.T) {
+	db := New()
+	for i := 0; i < 10; i++ {
+		db.ZAdd("z", float64(i), []byte(fmt.Sprintf("m%d", i)))
+	}
+
+	count := 0
+	db.ZRangeIter("z", 2, 5, func(member []byte) {
+		count++
+	})
+	if count != 4 {
+		t.Fatalf("expected 4, got %d", count)
+	}
+}
+
+// ============================================================================
+// IncrBy 溢出和错误处理
+// ============================================================================
+
+func TestIncrByFromString(t *testing.T) {
+	db := New()
+	db.Set("n", []byte("100"))
+	val, err := db.IncrBy("n", 50)
+	if err != nil || val != 150 {
+		t.Fatalf("expected 150, got %d, err=%v", val, err)
+	}
+}
+
+func TestIncrByInvalidString(t *testing.T) {
+	db := New()
+	db.Set("n", []byte("not_a_number"))
+	_, err := db.IncrBy("n", 1)
+	if err == nil {
+		t.Fatal("expected error for invalid number")
+	}
+}
+
+func TestIncrByFloatFromString(t *testing.T) {
+	db := New()
+	db.Set("n", []byte("10.5"))
+	val, err := db.IncrByFloat("n", 5.5)
+	if err != nil || val != 16.0 {
+		t.Fatalf("expected 16.0, got %f, err=%v", val, err)
+	}
+}
+
+// ============================================================================
+// ZAddBuffer 边界
+// ============================================================================
+
+func TestZAddBufferNil(t *testing.T) {
+	db := New()
+	defer func() {
+		if r := recover(); r == nil {
+			if db.ZCard("z") != 0 {
+				t.Fatal("expected 0 for nil buffer")
+			}
+		}
+	}()
+	db.ZAddBuffer("z", 1.0, nil)
+}
+
+func TestZAddBufferEmpty(t *testing.T) {
+	db := New()
+	pb := Buf("")
+	db.ZAddBuffer("z", 1.0, pb)
+	pb.Close()
+	if db.ZCard("z") != 1 {
+		t.Fatalf("expected 1, got %d", db.ZCard("z"))
+	}
+}
+
+// ============================================================================
+// ZRange 边界
+// ============================================================================
+
+func TestZRangeEmpty(t *testing.T) {
+	db := New()
+	zs := db.ZRange("nonexistent", 0, -1)
+	if zs != nil && zs.Len() != 0 {
+		t.Fatal("expected empty or nil")
+	}
+	if zs != nil {
+		zs.Close()
+	}
+}
+
+func TestZRangeSingleElement(t *testing.T) {
+	db := New()
+	db.ZAdd("z", 1.0, []byte("only"))
+	zs := db.ZRange("z", 0, -1)
+	if zs.Len() != 1 {
+		t.Fatalf("expected 1, got %d", zs.Len())
+	}
+	if string(zs.Get(0)) != "only" {
+		t.Fatalf("expected 'only', got '%s'", string(zs.Get(0)))
+	}
+	zs.Close()
+}
+
+// ============================================================================
+// ZRangeByScore 边界
+// ============================================================================
+
+func TestZRangeByScoreNoMatch(t *testing.T) {
+	db := New()
+	db.ZAdd("z", 100.0, []byte("a"))
+	zs := db.ZRangeByScore("z", 0, 50)
+	if zs == nil || zs.Len() != 0 {
+		t.Fatalf("expected 0, got %d", zs.Len())
+	}
+	if zs != nil {
+		zs.Close()
+	}
+}
+
+func TestZRangeByScoreExactMatch(t *testing.T) {
+	db := New()
+	db.ZAdd("z", 50.0, []byte("a"))
+	zs := db.ZRangeByScore("z", 50, 50)
+	if zs == nil || zs.Len() != 1 {
+		t.Fatalf("expected 1, got %d", zs.Len())
+	}
+	if zs != nil {
+		zs.Close()
+	}
+}
+
+// ============================================================================
+// ZRemBuffer 边界
+// ============================================================================
+
+func TestZRemBufferNil(t *testing.T) {
+	db := New()
+	db.ZAdd("z", 1.0, []byte("a"))
+	defer func() {
+		if r := recover(); r == nil {
+			if db.ZCard("z") != 1 {
+				t.Fatal("expected 1 after nil buffer removal attempt")
+			}
+		}
+	}()
+	db.ZRemBuffer("z", nil)
+}
+
+func TestZRemBufferNonexistent(t *testing.T) {
+	db := New()
+	db.ZAdd("z", 1.0, []byte("a"))
+	pb := Buf("nonexistent")
+	removed := db.ZRemBuffer("z", pb)
+	pb.Close()
+	if removed {
+		t.Fatal("expected false for nonexistent member")
+	}
+}
+
+// ============================================================================
+// ZRank / ZRevRank
+// ============================================================================
+
+func TestZRank(t *testing.T) {
+	db := New()
+	db.ZAdd("z", 1.0, []byte("a"))
+	db.ZAdd("z", 2.0, []byte("b"))
+	db.ZAdd("z", 3.0, []byte("c"))
+
+	rank, ok := db.ZRank("z", []byte("a"))
+	if !ok || rank != 0 {
+		t.Fatalf("expected rank 0 for 'a', got %d, ok=%v", rank, ok)
+	}
+
+	rank, ok = db.ZRank("z", []byte("b"))
+	if !ok || rank != 1 {
+		t.Fatalf("expected rank 1 for 'b', got %d, ok=%v", rank, ok)
+	}
+
+	rank, ok = db.ZRank("z", []byte("c"))
+	if !ok || rank != 2 {
+		t.Fatalf("expected rank 2 for 'c', got %d, ok=%v", rank, ok)
+	}
+
+	_, ok = db.ZRank("z", []byte("nonexistent"))
+	if ok {
+		t.Fatal("expected not found for nonexistent member")
+	}
+
+	_, ok = db.ZRank("nonexistent", []byte("a"))
+	if ok {
+		t.Fatal("expected not found for nonexistent key")
+	}
+}
+
+func TestZRevRank(t *testing.T) {
+	db := New()
+	db.ZAdd("z", 1.0, []byte("a"))
+	db.ZAdd("z", 2.0, []byte("b"))
+	db.ZAdd("z", 3.0, []byte("c"))
+
+	rank, ok := db.ZRevRank("z", []byte("c"))
+	if !ok || rank != 0 {
+		t.Fatalf("expected rev rank 0 for 'c', got %d, ok=%v", rank, ok)
+	}
+
+	rank, ok = db.ZRevRank("z", []byte("a"))
+	if !ok || rank != 2 {
+		t.Fatalf("expected rev rank 2 for 'a', got %d, ok=%v", rank, ok)
+	}
+}
+
+// ============================================================================
+// ZIncrBy
+// ============================================================================
+
+func TestZIncrBy(t *testing.T) {
+	db := New()
+	db.ZAdd("z", 1.0, []byte("a"))
+
+	newScore := db.ZIncrBy("z", []byte("a"), 2.0)
+	if newScore != 3.0 {
+		t.Fatalf("expected 3.0, got %f", newScore)
+	}
+
+	score, _ := db.ZScore("z", []byte("a"))
+	if score != 3.0 {
+		t.Fatalf("expected stored score 3.0, got %f", score)
+	}
+}
+
+func TestZIncrByNewMember(t *testing.T) {
+	db := New()
+	newScore := db.ZIncrBy("z", []byte("new"), 5.0)
+	if newScore != 5.0 {
+		t.Fatalf("expected 5.0 for new member, got %f", newScore)
+	}
+
+	if db.ZCard("z") != 1 {
+		t.Fatal("expected 1 member")
+	}
+}
+
+func TestZIncrByNegativeDelta(t *testing.T) {
+	db := New()
+	db.ZAdd("z", 5.0, []byte("a"))
+
+	newScore := db.ZIncrBy("z", []byte("a"), -3.0)
+	if newScore != 2.0 {
+		t.Fatalf("expected 2.0, got %f", newScore)
+	}
+}
+
+// ============================================================================
+// ZPopMin / ZPopMax
+// ============================================================================
+
+func TestZPopMin(t *testing.T) {
+	db := New()
+	db.ZAdd("z", 1.0, []byte("a"))
+	db.ZAdd("z", 2.0, []byte("b"))
+	db.ZAdd("z", 3.0, []byte("c"))
+
+	zs := db.ZPopMin("z", 2)
+	if zs.Len() != 2 {
+		t.Fatalf("expected 2, got %d", zs.Len())
+	}
+	if string(zs.Get(0)) != "a" {
+		t.Fatalf("expected first popped 'a', got '%s'", string(zs.Get(0)))
+	}
+	if string(zs.Get(1)) != "b" {
+		t.Fatalf("expected second popped 'b', got '%s'", string(zs.Get(1)))
+	}
+	zs.Close()
+
+	if db.ZCard("z") != 1 {
+		t.Fatalf("expected 1 remaining, got %d", db.ZCard("z"))
+	}
+}
+
+func TestZPopMax(t *testing.T) {
+	db := New()
+	db.ZAdd("z", 1.0, []byte("a"))
+	db.ZAdd("z", 2.0, []byte("b"))
+	db.ZAdd("z", 3.0, []byte("c"))
+
+	zs := db.ZPopMax("z", 2)
+	if zs.Len() != 2 {
+		t.Fatalf("expected 2, got %d", zs.Len())
+	}
+	if string(zs.Get(0)) != "c" {
+		t.Fatalf("expected first popped 'c', got '%s'", string(zs.Get(0)))
+	}
+	if string(zs.Get(1)) != "b" {
+		t.Fatalf("expected second popped 'b', got '%s'", string(zs.Get(1)))
+	}
+	zs.Close()
+
+	if db.ZCard("z") != 1 {
+		t.Fatalf("expected 1 remaining, got %d", db.ZCard("z"))
+	}
+}
+
+func TestZPopMinEmpty(t *testing.T) {
+	db := New()
+	zs := db.ZPopMin("nonexistent", 1)
+	if zs != nil {
+		t.Fatal("expected nil for nonexistent key")
+	}
+}
+
+func TestZPopMaxCountZero(t *testing.T) {
+	db := New()
+	db.ZAdd("z", 1.0, []byte("a"))
+	zs := db.ZPopMax("z", 0)
+	if zs.Len() != 0 {
+		t.Fatalf("expected 0, got %d", zs.Len())
+	}
+	zs.Close()
+	if db.ZCard("z") != 1 {
+		t.Fatal("expected 1 remaining")
+	}
+}
+
+// ============================================================================
+// Stream parseStreamID 边界
+// ============================================================================
+
+func TestParseStreamIDZero(t *testing.T) {
+	db := New()
+	id := db.XAdd("s", "0", map[string]*PooledBuffer{"f": Buf("v")})
+	if id == "" {
+		t.Fatal("expected non-empty id")
+	}
+}
+
+func TestParseStreamIDZeroZero(t *testing.T) {
+	db := New()
+	id := db.XAdd("s", "0-0", map[string]*PooledBuffer{"f": Buf("v")})
+	if id == "" {
+		t.Fatal("expected non-empty id")
+	}
+}
+
+// ============================================================================
+// Dict 边界
+// ============================================================================
+
+func TestDictKeyEquals(t *testing.T) {
+	db := New()
+	db.Set("key1", []byte("val1"))
+	db.Set("key1", []byte("val2"))
+
+	v, ok := db.Get("key1")
+	if !ok || v.String() != "val2" {
+		t.Fatalf("expected 'val2', got '%s'", v.String())
+	}
+	v.Close()
+}
+
+// ============================================================================
+// PoolBuffer WriteByte/ReadByte
+// ============================================================================
+
+func TestPoolBufferWriteByteReadByte(t *testing.T) {
+	pb := Buf("")
+	if err := pb.WriteByte('A'); err != nil {
+		t.Fatalf("write error: %v", err)
+	}
+	if err := pb.WriteByte('B'); err != nil {
+		t.Fatalf("write error: %v", err)
+	}
+	b, err := pb.ReadByte()
+	if err != nil || b != 'A' {
+		t.Fatalf("expected 'A', got '%c', err=%v", b, err)
+	}
+	b, err = pb.ReadByte()
+	if err != nil || b != 'B' {
+		t.Fatalf("expected 'B', got '%c', err=%v", b, err)
+	}
+	pb.Close()
+}
+
+func TestPoolBufferReadByteEmpty(t *testing.T) {
+	pb := Buf("")
+	_, err := pb.ReadByte()
+	if err == nil {
+		t.Fatal("expected error for empty buffer")
+	}
+	pb.Close()
+}
+
+// ============================================================================
+// GetRange 边界
+// ============================================================================
+
+func TestGetRangeFullString(t *testing.T) {
+	db := New()
+	db.Set("key", []byte("hello"))
+	v, ok := db.GetRange("key", 0, 4)
+	if !ok || v.String() != "hello" {
+		t.Fatalf("expected 'hello', got '%s'", v.String())
+	}
+	v.Close()
+}
+
+func TestGetRangeSingleChar(t *testing.T) {
+	db := New()
+	db.Set("key", []byte("hello"))
+	v, ok := db.GetRange("key", 0, 0)
+	if !ok || v.String() != "h" {
+		t.Fatalf("expected 'h', got '%s'", v.String())
+	}
+	v.Close()
+}
+
+// ============================================================================
+// SetRange 边界
+// ============================================================================
+
+func TestSetRangeExtend(t *testing.T) {
+	db := New()
+	db.Set("key", []byte("hello"))
+	n := db.SetRange("key", 10, []byte("world"))
+	if n != 15 {
+		t.Fatalf("expected 15, got %d", n)
+	}
+	v, _ := db.Get("key")
+	expected := "hello" + strings.Repeat("\x00", 5) + "world"
+	if v.String() != expected {
+		t.Fatalf("expected '%s', got '%s'", expected, v.String())
+	}
+	v.Close()
+}
+
+// ============================================================================
+// Strlen 边界
+// ============================================================================
+
+func TestStrlenNonexistent(t *testing.T) {
+	db := New()
+	n := db.Strlen("nonexistent")
+	if n != 0 {
+		t.Fatalf("expected 0, got %d", n)
+	}
+}
+
+func TestStrlenEmpty(t *testing.T) {
+	db := New()
+	db.Set("key", []byte(""))
+	n := db.Strlen("key")
+	if n != 0 {
+		t.Fatalf("expected 0, got %d", n)
+	}
+}
+
+// ============================================================================
+// Append 边界
+// ============================================================================
+
+func TestAppendToEmpty(t *testing.T) {
+	db := New()
+	db.Set("key", []byte(""))
+	n := db.Append("key", []byte("hello"))
+	if n != 5 {
+		t.Fatalf("expected 5, got %d", n)
+	}
+}
+
+func TestAppendBuffer(t *testing.T) {
+	db := New()
+	db.Set("key", []byte("hello"))
+	pb := Buf("world")
+	n := db.AppendBuffer("key", pb)
+	pb.Close()
+	if n != 10 {
+		t.Fatalf("expected 10, got %d", n)
+	}
+}
+
+// ============================================================================
+// String 新命令测试: SetEx, PsetEx, GetDel
+// ============================================================================
+
+func TestSetEx(t *testing.T) {
+	db := New()
+	db.SetEx("key", 10, []byte("hello"))
+	val, ok := db.Get("key")
+	if !ok || val.String() != "hello" {
+		t.Fatalf("expected 'hello', got '%s', ok=%v", val.String(), ok)
+	}
+	val.Close()
+}
+
+func TestPsetEx(t *testing.T) {
+	db := New()
+	db.PsetEx("key", 10000, []byte("world"))
+	val, ok := db.Get("key")
+	if !ok || val.String() != "world" {
+		t.Fatalf("expected 'world', got '%s', ok=%v", val.String(), ok)
+	}
+	val.Close()
+}
+
+func TestGetDel(t *testing.T) {
+	db := New()
+	db.Set("key", []byte("hello"))
+	val, ok := db.GetDel("key")
+	if !ok || val.String() != "hello" {
+		t.Fatalf("expected 'hello', got '%s', ok=%v", val.String(), ok)
+	}
+	val.Close()
+
+	val, ok = db.Get("key")
+	if ok {
+		t.Fatal("expected key to be deleted")
+	}
+}
+
+func TestGetDelNonExistent(t *testing.T) {
+	db := New()
+	val, ok := db.GetDel("nonexistent")
+	if ok || val != nil {
+		t.Fatal("expected nil for nonexistent key")
+	}
+}
+
+// ============================================================================
+// Bitmap 新命令测试: BitPos
+// ============================================================================
+
+func TestBitPos(t *testing.T) {
+	db := New()
+	db.SetBit("key", 0, 1)
+	db.SetBit("key", 8, 1)
+
+	pos := db.BitPos("key", 1, 0, -1)
+	if pos != 0 {
+		t.Fatalf("expected first 1 at pos 0, got %d", pos)
+	}
+
+	pos = db.BitPos("key", 1, 1, -1)
+	if pos != 8 {
+		t.Fatalf("expected first 1 at pos 8, got %d", pos)
+	}
+
+	pos = db.BitPos("key", 0, 0, 0)
+	if pos != 1 {
+		t.Fatalf("expected first 0 at pos 1 in byte 0, got %d", pos)
+	}
+}
+
+func TestBitPosNonExistent(t *testing.T) {
+	db := New()
+	pos := db.BitPos("nonexistent", 0, 0, -1)
+	if pos != 0 {
+		t.Fatalf("expected 0 for nonexistent key with bit=0, got %d", pos)
+	}
+
+	pos = db.BitPos("nonexistent", 1, 0, -1)
+	if pos != -1 {
+		t.Fatalf("expected -1 for nonexistent key with bit=1, got %d", pos)
+	}
+}
+
+func TestBitPosAllZeros(t *testing.T) {
+	db := New()
+	db.Set("key", []byte{0, 0, 0})
+
+	pos := db.BitPos("key", 1, 0, -1)
+	if pos != -1 {
+		t.Fatalf("expected -1 for all zeros, got %d", pos)
+	}
+}
+
+func TestBitPosAllOnes(t *testing.T) {
+	db := New()
+	db.Set("key", []byte{255, 255, 255})
+
+	pos := db.BitPos("key", 1, 0, -1)
+	if pos != 0 {
+		t.Fatalf("expected first 1 at pos 0, got %d", pos)
+	}
+}
+
+// ============================================================================
+// Hash 新命令测试: HStrLen, HRandField
+// ============================================================================
+
+func TestHStrLen(t *testing.T) {
+	db := New()
+	db.HSet("h", "f1", []byte("hello"))
+	db.HSet("h", "f2", []byte("world"))
+
+	len := db.HStrLen("h", "f1")
+	if len != 5 {
+		t.Fatalf("expected len 5 for 'hello', got %d", len)
+	}
+
+	len = db.HStrLen("h", "f2")
+	if len != 5 {
+		t.Fatalf("expected len 5 for 'world', got %d", len)
+	}
+
+	len = db.HStrLen("h", "nonexistent")
+	if len != 0 {
+		t.Fatalf("expected len 0 for nonexistent field, got %d", len)
+	}
+
+	len = db.HStrLen("nonexistent", "f1")
+	if len != 0 {
+		t.Fatalf("expected len 0 for nonexistent key, got %d", len)
+	}
+}
+
+func TestHRandField(t *testing.T) {
+	db := New()
+	db.HSet("h", "f1", []byte("v1"))
+	db.HSet("h", "f2", []byte("v2"))
+	db.HSet("h", "f3", []byte("v3"))
+
+	fields := db.HRandField("h", 2)
+	if fields == nil || len(fields) != 2 {
+		t.Fatalf("expected 2 fields, got %v", fields)
+	}
+	for _, f := range fields {
+		f.Close()
+	}
+}
+
+func TestHRandFieldNonExistent(t *testing.T) {
+	db := New()
+	fields := db.HRandField("nonexistent", 2)
+	if fields != nil {
+		t.Fatal("expected nil for nonexistent key")
+	}
+}
+
+func TestHRandFieldCountExceeds(t *testing.T) {
+	db := New()
+	db.HSet("h", "f1", []byte("v1"))
+
+	fields := db.HRandField("h", 10)
+	if fields == nil || len(fields) > 1 {
+		t.Fatalf("expected at most 1 field, got %d", len(fields))
+	}
+	for _, f := range fields {
+		f.Close()
+	}
+}
+
+// ============================================================================
+// List 新命令测试: RPopLPush, LInsert
+// ============================================================================
+
+func TestRPopLPush(t *testing.T) {
+	db := New()
+	db.RPush("src", []byte("a"), []byte("b"), []byte("c"))
+
+	val, ok := db.RPopLPush("src", "dst")
+	if !ok || val.String() != "c" {
+		t.Fatalf("expected 'c', got '%s', ok=%v", val.String(), ok)
+	}
+	val.Close()
+
+	vals := db.LRange("src", 0, -1)
+	if vals.Len() != 2 {
+		t.Fatalf("expected 2 elements in src, got %d", vals.Len())
+	}
+	vals.Close()
+
+	vals = db.LRange("dst", 0, -1)
+	if vals.Len() != 1 {
+		t.Fatalf("expected 1 element in dst, got %d", vals.Len())
+	}
+	vals.Close()
+}
+
+func TestRPopLPushSrcEmpty(t *testing.T) {
+	db := New()
+	db.RPush("dst", []byte("existing"))
+
+	val, ok := db.RPopLPush("nonexistent", "dst")
+	if ok || val != nil {
+		t.Fatal("expected nil for empty source")
+	}
+}
+
+func TestRPopLPushSameKey(t *testing.T) {
+	db := New()
+	db.RPush("list", []byte("a"), []byte("b"), []byte("c"))
+
+	val, ok := db.RPopLPush("list", "list")
+	if !ok || val.String() != "c" {
+		t.Fatalf("expected 'c', got '%s', ok=%v", val.String(), ok)
+	}
+	val.Close()
+
+	vals := db.LRange("list", 0, -1)
+	if vals.Len() != 3 {
+		t.Fatalf("expected 3 elements, got %d", vals.Len())
+	}
+	vals.Close()
+}
+
+func TestLInsert(t *testing.T) {
+	db := New()
+	db.RPush("list", []byte("a"), []byte("c"))
+
+	n := db.LInsert("list", "BEFORE", "c", []byte("b"))
+	if n != 3 {
+		t.Fatalf("expected 3, got %d", n)
+	}
+
+	vals := db.LRange("list", 0, -1)
+	if vals.Len() != 3 {
+		t.Fatalf("expected 3 elements, got %d", vals.Len())
+	}
+	vals.Close()
+}
+
+func TestLInsertAfter(t *testing.T) {
+	db := New()
+	db.RPush("list", []byte("a"), []byte("c"))
+
+	n := db.LInsert("list", "AFTER", "a", []byte("b"))
+	if n != 3 {
+		t.Fatalf("expected 3, got %d", n)
+	}
+
+	vals := db.LRange("list", 0, -1)
+	if vals.Len() != 3 {
+		t.Fatalf("expected 3 elements, got %d", vals.Len())
+	}
+	vals.Close()
+}
+
+func TestLInsertNonExistent(t *testing.T) {
+	db := New()
+	n := db.LInsert("nonexistent", "BEFORE", "pivot", []byte("val"))
+	if n != -1 {
+		t.Fatalf("expected -1 for nonexistent key, got %d", n)
+	}
+}
+
+func TestLInsertPivotNotFound(t *testing.T) {
+	db := New()
+	db.RPush("list", []byte("a"), []byte("c"))
+
+	n := db.LInsert("list", "BEFORE", "nonexistent", []byte("b"))
+	if n != -1 {
+		t.Fatalf("expected -1 for pivot not found, got %d", n)
+	}
+}
+
+// ============================================================================
+// Set 新命令测试: SMove
+// ============================================================================
+
+func TestSMove(t *testing.T) {
+	db := New()
+	db.SAdd("src", []byte("a"), []byte("b"), []byte("c"))
+	db.SAdd("dst", []byte("x"))
+
+	ok := db.SMove("src", "dst", []byte("b"))
+	if !ok {
+		t.Fatal("expected SMove to succeed")
+	}
+
+	if !db.SIsMember("dst", []byte("b")) {
+		t.Fatal("expected 'b' in dst")
+	}
+
+	if db.SIsMember("src", []byte("b")) {
+		t.Fatal("expected 'b' removed from src")
+	}
+}
+
+func TestSMoveToNonExistent(t *testing.T) {
+	db := New()
+	db.SAdd("src", []byte("a"), []byte("b"))
+
+	ok := db.SMove("src", "dst", []byte("a"))
+	if !ok {
+		t.Fatal("expected SMove to succeed")
+	}
+
+	if !db.SIsMember("dst", []byte("a")) {
+		t.Fatal("expected 'a' in dst")
+	}
+}
+
+func TestSMoveNonExistent(t *testing.T) {
+	db := New()
+	ok := db.SMove("nonexistent", "dst", []byte("a"))
+	if ok {
+		t.Fatal("expected SMove to fail for nonexistent source")
+	}
+}
+
+func TestSMoveMemberNotInSource(t *testing.T) {
+	db := New()
+	db.SAdd("src", []byte("a"))
+	db.SAdd("dst", []byte("x"))
+
+	ok := db.SMove("src", "dst", []byte("nonexistent"))
+	if ok {
+		t.Fatal("expected SMove to fail for member not in source")
+	}
+}
+
+// ============================================================================
+// ZSet 新命令测试: ZCount, ZLexCount, ZRangeByLex, BZMPop
+// ============================================================================
+
+func TestZCount(t *testing.T) {
+	db := New()
+	db.ZAdd("z", 1.0, []byte("a"))
+	db.ZAdd("z", 2.0, []byte("b"))
+	db.ZAdd("z", 3.0, []byte("c"))
+	db.ZAdd("z", 4.0, []byte("d"))
+
+	count := db.ZCount("z", 1.0, 3.0)
+	if count != 3 {
+		t.Fatalf("expected count 3, got %d", count)
+	}
+
+	count = db.ZCount("z", 2.5, 4.0)
+	if count != 2 {
+		t.Fatalf("expected count 2, got %d", count)
+	}
+
+	count = db.ZCount("z", 10.0, 20.0)
+	if count != 0 {
+		t.Fatalf("expected count 0, got %d", count)
+	}
+}
+
+func TestZCountNonExistent(t *testing.T) {
+	db := New()
+	count := db.ZCount("nonexistent", 1.0, 10.0)
+	if count != 0 {
+		t.Fatalf("expected 0, got %d", count)
+	}
+}
+
+func TestZLexCount(t *testing.T) {
+	db := New()
+	db.ZAdd("z", 0.0, []byte("a"))
+	db.ZAdd("z", 0.0, []byte("b"))
+	db.ZAdd("z", 0.0, []byte("c"))
+	db.ZAdd("z", 0.0, []byte("d"))
+
+	count := db.ZLexCount("z", "-", "+")
+	if count != 4 {
+		t.Fatalf("expected count 4, got %d", count)
+	}
+
+	count = db.ZLexCount("z", "b", "d")
+	if count != 3 {
+		t.Fatalf("expected count 3, got %d", count)
+	}
+
+	count = db.ZLexCount("z", "(b", "d")
+	if count != 2 {
+		t.Fatalf("expected count 2, got %d", count)
+	}
+}
+
+func TestZLexCountNonExistent(t *testing.T) {
+	db := New()
+	count := db.ZLexCount("nonexistent", "-", "+")
+	if count != 0 {
+		t.Fatalf("expected 0, got %d", count)
+	}
+}
+
+func TestZRangeByLex(t *testing.T) {
+	db := New()
+	db.ZAdd("z", 0.0, []byte("a"))
+	db.ZAdd("z", 0.0, []byte("b"))
+	db.ZAdd("z", 0.0, []byte("c"))
+	db.ZAdd("z", 0.0, []byte("d"))
+
+	result := db.ZRangeByLex("z", "b", "d")
+	if result == nil {
+		t.Fatal("expected result, got nil")
+	}
+	if result.Len() != 3 {
+		t.Fatalf("expected 3 elements, got %d", result.Len())
+	}
+	result.Close()
+}
+
+func TestZRangeByLexNonExistent(t *testing.T) {
+	db := New()
+	result := db.ZRangeByLex("nonexistent", "-", "+")
+	if result != nil {
+		t.Fatal("expected nil for nonexistent key")
+	}
+}
+
+func TestZRangeByLexExclusive(t *testing.T) {
+	db := New()
+	db.ZAdd("z", 0.0, []byte("a"))
+	db.ZAdd("z", 0.0, []byte("b"))
+	db.ZAdd("z", 0.0, []byte("c"))
+
+	result := db.ZRangeByLex("z", "b", "+")
+	if result == nil {
+		t.Fatal("expected result, got nil")
+	}
+	if result.Len() < 1 {
+		t.Fatalf("expected at least 1 element, got %d", result.Len())
+	}
+	result.Close()
+}
+
+func TestBZMPop(t *testing.T) {
+	db := New()
+	db.ZAdd("z1", 1.0, []byte("a"))
+	db.ZAdd("z1", 2.0, []byte("b"))
+	db.ZAdd("z2", 1.0, []byte("c"))
+
+	key, member, score, found := db.BZMPop(1, 2, []string{"z1", "z2"}, "MIN")
+	if !found {
+		t.Fatal("expected to find element")
+	}
+	if key != "z1" {
+		t.Fatalf("expected key 'z1', got '%s'", key)
+	}
+	if member.String() != "a" {
+		t.Fatalf("expected member 'a', got '%s'", member.String())
+	}
+	if score != 1.0 {
+		t.Fatalf("expected score 1.0, got %f", score)
+	}
+	member.Close()
+}
+
+func TestBZMPopMax(t *testing.T) {
+	db := New()
+	db.ZAdd("z", 1.0, []byte("a"))
+	db.ZAdd("z", 2.0, []byte("b"))
+	db.ZAdd("z", 3.0, []byte("c"))
+
+	_, member, score, found := db.BZMPop(1, 1, []string{"z"}, "MAX")
+	if !found {
+		t.Fatal("expected to find element")
+	}
+	if member.String() != "c" {
+		t.Fatalf("expected member 'c', got '%s'", member.String())
+	}
+	if score != 3.0 {
+		t.Fatalf("expected score 3.0, got %f", score)
+	}
+	member.Close()
+}
+
+func TestBZMPopNotFound(t *testing.T) {
+	db := New()
+	_, _, _, found := db.BZMPop(1, 1, []string{"nonexistent"}, "MIN")
+	if found {
+		t.Fatal("expected not found")
+	}
+}
+
+// ============================================================================
+// Stream 新命令测试: XInfo, XInfoGroups, XClaim, XAutoClaim, XPending,
+//                   XGroupCreateConsumer, XGroupDelConsumer
+// ============================================================================
+
+func TestXInfo(t *testing.T) {
+	db := New()
+	db.XAdd("s", "*", map[string]*PooledBuffer{"f": Buf("v")})
+	db.XAdd("s", "*", map[string]*PooledBuffer{"f": Buf("v2")})
+
+	info := db.XInfo("s")
+	if info == nil {
+		t.Fatal("expected info, got nil")
+	}
+	if info["length"] != 2 {
+		t.Fatalf("expected length 2, got %v", info["length"])
+	}
+	if info["groups"] != 0 {
+		t.Fatalf("expected groups 0, got %v", info["groups"])
+	}
+}
+
+func TestXInfoNonExistent(t *testing.T) {
+	db := New()
+	info := db.XInfo("nonexistent")
+	if info != nil {
+		t.Fatal("expected nil for nonexistent stream")
+	}
+}
+
+func TestXInfoGroups(t *testing.T) {
+	db := New()
+	db.XAdd("s", "*", map[string]*PooledBuffer{"f": Buf("v")})
+	db.XGroupCreate("s", "g1", "0-0")
+	db.XGroupCreate("s", "g2", "0-0")
+
+	groups := db.XInfoGroups("s")
+	if groups == nil {
+		t.Fatal("expected groups, got nil")
+	}
+	if len(groups) != 2 {
+		t.Fatalf("expected 2 groups, got %d", len(groups))
+	}
+}
+
+func TestXInfoGroupsNonExistent(t *testing.T) {
+	db := New()
+	groups := db.XInfoGroups("nonexistent")
+	if groups != nil {
+		t.Fatal("expected nil for nonexistent stream")
+	}
+}
+
+func TestXClaim(t *testing.T) {
+	db := New()
+	db.XAdd("s", "1-0", map[string]*PooledBuffer{"f": Buf("v")})
+	db.XGroupCreate("s", "g", "0-0")
+
+	entries := db.XClaim("s", "g", "c1", 0, []string{"1-0"})
+	if entries == nil {
+		t.Fatal("expected entries, got nil")
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+}
+
+func TestXClaimNonExistent(t *testing.T) {
+	db := New()
+	entries := db.XClaim("nonexistent", "g", "c", 0, []string{"1-0"})
+	if entries != nil {
+		t.Fatal("expected nil for nonexistent stream")
+	}
+}
+
+func TestXClaimGroupNotFound(t *testing.T) {
+	db := New()
+	db.XAdd("s", "1-0", map[string]*PooledBuffer{"f": Buf("v")})
+
+	entries := db.XClaim("s", "nonexistent", "c", 0, []string{"1-0"})
+	if entries != nil {
+		t.Fatal("expected nil for nonexistent group")
+	}
+}
+
+func TestXAutoClaim(t *testing.T) {
+	db := New()
+	db.XAdd("s", "1-0", map[string]*PooledBuffer{"f": Buf("v")})
+	db.XAdd("s", "2-0", map[string]*PooledBuffer{"f": Buf("v2")})
+	db.XGroupCreate("s", "g", "0-0")
+
+	nextID, entries := db.XAutoClaim("s", "g", "c1", "0-0", 10)
+	if nextID == "" {
+		t.Fatal("expected nextID, got empty")
+	}
+	if entries == nil {
+		t.Fatal("expected entries, got nil")
+	}
+}
+
+func TestXAutoClaimNonExistent(t *testing.T) {
+	db := New()
+	_, entries := db.XAutoClaim("nonexistent", "g", "c", "0-0", 10)
+	if entries != nil {
+		t.Fatal("expected nil for nonexistent stream")
+	}
+}
+
+func TestXPending(t *testing.T) {
+	db := New()
+	db.XAdd("s", "1-0", map[string]*PooledBuffer{"f": Buf("v")})
+	db.XGroupCreate("s", "g", "0-0")
+
+	pending := db.XPending("s", "g")
+	if pending == nil {
+		t.Fatal("expected pending info, got nil")
+	}
+}
+
+func TestXPendingNonExistent(t *testing.T) {
+	db := New()
+	pending := db.XPending("nonexistent", "g")
+	if pending != nil {
+		t.Fatal("expected nil for nonexistent stream")
+	}
+}
+
+func TestXGroupCreateConsumer(t *testing.T) {
+	db := New()
+	db.XAdd("s", "*", map[string]*PooledBuffer{"f": Buf("v")})
+	db.XGroupCreate("s", "g", "0-0")
+
+	ok := db.XGroupCreateConsumer("s", "g", "c1")
+	if !ok {
+		t.Fatal("expected consumer creation success")
+	}
+
+	ok = db.XGroupCreateConsumer("s", "g", "c1")
+	if !ok {
+		t.Fatal("expected consumer to already exist (success)")
+	}
+}
+
+func TestXGroupCreateConsumerNonExistent(t *testing.T) {
+	db := New()
+	ok := db.XGroupCreateConsumer("nonexistent", "g", "c")
+	if ok {
+		t.Fatal("expected failure for nonexistent stream")
+	}
+}
+
+func TestXGroupCreateConsumerGroupNotFound(t *testing.T) {
+	db := New()
+	db.XAdd("s", "*", map[string]*PooledBuffer{"f": Buf("v")})
+
+	ok := db.XGroupCreateConsumer("s", "nonexistent", "c")
+	if ok {
+		t.Fatal("expected failure for nonexistent group")
+	}
+}
+
+func TestXGroupDelConsumer(t *testing.T) {
+	db := New()
+	db.XAdd("s", "*", map[string]*PooledBuffer{"f": Buf("v")})
+	db.XGroupCreate("s", "g", "0-0")
+	db.XGroupCreateConsumer("s", "g", "c1")
+
+	n := db.XGroupDelConsumer("s", "g", "c1")
+	if n != 1 {
+		t.Fatalf("expected 1, got %d", n)
+	}
+}
+
+func TestXGroupDelConsumerNonExistent(t *testing.T) {
+	db := New()
+	n := db.XGroupDelConsumer("nonexistent", "g", "c")
+	if n != 0 {
+		t.Fatalf("expected 0, got %d", n)
+	}
+}
+
+// ============================================================================
+// String 新命令测试: MGet, MSet, SetNX, Decr
+// ============================================================================
+
+func TestMGet(t *testing.T) {
+	db := New()
+	db.Set("key1", []byte("val1"))
+	db.Set("key2", []byte("val2"))
+
+	results := db.MGet("key1", "key2", "nonexistent")
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(results))
+	}
+
+	if results[0] == nil || results[0].String() != "val1" {
+		t.Fatalf("expected 'val1', got '%s'", results[0].String())
+	}
+	results[0].Close()
+
+	if results[1] == nil || results[1].String() != "val2" {
+		t.Fatalf("expected 'val2', got '%s'", results[1].String())
+	}
+	results[1].Close()
+
+	if results[2] != nil {
+		t.Fatalf("expected nil for nonexistent key, got '%s'", results[2].String())
+	}
+}
+
+func TestMGetEmptyKeys(t *testing.T) {
+	db := New()
+	results := db.MGet()
+	if len(results) != 0 {
+		t.Fatalf("expected 0 results, got %d", len(results))
+	}
+}
+
+func TestMGetAllNonExistent(t *testing.T) {
+	db := New()
+	results := db.MGet("key1", "key2", "key3")
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(results))
+	}
+	for i, r := range results {
+		if r != nil {
+			t.Fatalf("expected nil at index %d, got '%s'", i, r.String())
+		}
+	}
+}
+
+func TestMSet(t *testing.T) {
+	db := New()
+	db.MSet(map[string]*PooledBuffer{
+		"key1": Buf("val1"),
+		"key2": Buf("val2"),
+		"key3": Buf("val3"),
+	})
+
+	val, ok := db.Get("key1")
+	if !ok || val.String() != "val1" {
+		t.Fatalf("expected 'val1', got '%s', ok=%v", val.String(), ok)
+	}
+	val.Close()
+
+	val, ok = db.Get("key2")
+	if !ok || val.String() != "val2" {
+		t.Fatalf("expected 'val2', got '%s', ok=%v", val.String(), ok)
+	}
+	val.Close()
+
+	val, ok = db.Get("key3")
+	if !ok || val.String() != "val3" {
+		t.Fatalf("expected 'val3', got '%s', ok=%v", val.String(), ok)
+	}
+	val.Close()
+}
+
+func TestMSetOverwrite(t *testing.T) {
+	db := New()
+	db.Set("key1", []byte("original"))
+
+	db.MSet(map[string]*PooledBuffer{
+		"key1": Buf("updated"),
+	})
+
+	val, ok := db.Get("key1")
+	if !ok || val.String() != "updated" {
+		t.Fatalf("expected 'updated', got '%s', ok=%v", val.String(), ok)
+	}
+	val.Close()
+}
+
+func TestMSetEmpty(t *testing.T) {
+	db := New()
+	db.MSet(map[string]*PooledBuffer{})
+}
+
+func TestSetNX(t *testing.T) {
+	db := New()
+
+	ok := db.SetNX("key", Buf("val"))
+	if !ok {
+		t.Fatal("expected SetNX to succeed for new key")
+	}
+
+	val, found := db.Get("key")
+	if !found || val.String() != "val" {
+		t.Fatalf("expected 'val', got '%s', found=%v", val.String(), found)
+	}
+	val.Close()
+}
+
+func TestSetNXExistingKey(t *testing.T) {
+	db := New()
+	db.Set("key", []byte("original"))
+
+	ok := db.SetNX("key", Buf("new"))
+	if ok {
+		t.Fatal("expected SetNX to fail for existing key")
+	}
+
+	val, found := db.Get("key")
+	if !found || val.String() != "original" {
+		t.Fatalf("expected 'original', got '%s', found=%v", val.String(), found)
+	}
+	val.Close()
+}
+
+func TestDecr(t *testing.T) {
+	db := New()
+
+	val, err := db.Decr("counter")
+	if err != nil || val != -1 {
+		t.Fatalf("expected -1, got %d, err=%v", val, err)
+	}
+
+	val, err = db.Decr("counter")
+	if err != nil || val != -2 {
+		t.Fatalf("expected -2, got %d, err=%v", val, err)
+	}
+}
+
+func TestDecrFromSetValue(t *testing.T) {
+	db := New()
+	db.Set("counter", []byte("10"))
+
+	val, err := db.Decr("counter")
+	if err != nil || val != 9 {
+		t.Fatalf("expected 9, got %d, err=%v", val, err)
+	}
+}
+
+func TestDecrZero(t *testing.T) {
+	db := New()
+	db.Set("counter", []byte("0"))
+
+	val, err := db.Decr("counter")
+	if err != nil || val != -1 {
+		t.Fatalf("expected -1, got %d, err=%v", val, err)
+	}
+}
+
+func TestDecrInvalidValue(t *testing.T) {
+	db := New()
+	db.Set("str", []byte("not-a-number"))
+
+	_, err := db.Decr("str")
+	if err == nil {
+		t.Fatal("expected error for invalid value")
+	}
+}
+
+// ============================================================================
+// Hash 新命令测试: HKeys, HVals, HMSet, HMGet
+// ============================================================================
+
+func TestHMSet(t *testing.T) {
+	db := New()
+
+	n := db.HMSet("h", map[string]*PooledBuffer{
+		"f1": Buf("v1"),
+		"f2": Buf("v2"),
+		"f3": Buf("v3"),
+	})
+	if n != 3 {
+		t.Fatalf("expected 3, got %d", n)
+	}
+
+	val, ok := db.HGet("h", "f1")
+	if !ok || val.String() != "v1" {
+		t.Fatalf("expected 'v1', got '%s', ok=%v", val.String(), ok)
+	}
+	val.Close()
+
+	val, ok = db.HGet("h", "f2")
+	if !ok || val.String() != "v2" {
+		t.Fatalf("expected 'v2', got '%s', ok=%v", val.String(), ok)
+	}
+	val.Close()
+
+	val, ok = db.HGet("h", "f3")
+	if !ok || val.String() != "v3" {
+		t.Fatalf("expected 'v3', got '%s', ok=%v", val.String(), ok)
+	}
+	val.Close()
+}
+
+func TestHMSetUpdate(t *testing.T) {
+	db := New()
+	db.HSet("h", "f1", []byte("original"))
+
+	n := db.HMSet("h", map[string]*PooledBuffer{
+		"f1": Buf("updated"),
+		"f2": Buf("new"),
+	})
+	if n != 2 {
+		t.Fatalf("expected 2, got %d", n)
+	}
+
+	val, ok := db.HGet("h", "f1")
+	if !ok || val.String() != "updated" {
+		t.Fatalf("expected 'updated', got '%s', ok=%v", val.String(), ok)
+	}
+	val.Close()
+}
+
+func TestHMSetEmpty(t *testing.T) {
+	db := New()
+	n := db.HMSet("h", map[string]*PooledBuffer{})
+	if n != 0 {
+		t.Fatalf("expected 0, got %d", n)
+	}
+}
+
+func TestHMGet(t *testing.T) {
+	db := New()
+	db.HSet("h", "f1", []byte("v1"))
+	db.HSet("h", "f2", []byte("v2"))
+
+	results := db.HMGet("h", "f1", "f2", "nonexistent")
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(results))
+	}
+
+	if results[0] == nil || results[0].String() != "v1" {
+		t.Fatalf("expected 'v1', got '%s'", results[0].String())
+	}
+	results[0].Close()
+
+	if results[1] == nil || results[1].String() != "v2" {
+		t.Fatalf("expected 'v2', got '%s'", results[1].String())
+	}
+	results[1].Close()
+
+	if results[2] != nil {
+		t.Fatalf("expected nil for nonexistent field, got '%s'", results[2].String())
+	}
+}
+
+func TestHMGetEmptyFields(t *testing.T) {
+	db := New()
+	db.HSet("h", "f1", []byte("v1"))
+
+	results := db.HMGet("h")
+	if len(results) != 0 {
+		t.Fatalf("expected 0 results, got %d", len(results))
+	}
+}
+
+func TestHMGetNonExistentKey(t *testing.T) {
+	db := New()
+	results := db.HMGet("nonexistent", "f1", "f2")
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+	for i, r := range results {
+		if r != nil {
+			t.Fatalf("expected nil at index %d, got '%s'", i, r.String())
+		}
+	}
+}
+
+func TestHKeys(t *testing.T) {
+	db := New()
+	db.HSet("h", "f1", []byte("v1"))
+	db.HSet("h", "f2", []byte("v2"))
+	db.HSet("h", "f3", []byte("v3"))
+
+	keys := db.HKeys("h")
+	if len(keys) != 3 {
+		t.Fatalf("expected 3 keys, got %d", len(keys))
+	}
+}
+
+func TestHKeysEmpty(t *testing.T) {
+	db := New()
+	db.HSet("h", "f1", []byte("v1"))
+	db.HDel("h", "f1")
+
+	keys := db.HKeys("h")
+	if len(keys) != 0 {
+		t.Fatalf("expected 0 keys, got %d", len(keys))
+	}
+}
+
+func TestHKeysNonExistent(t *testing.T) {
+	db := New()
+	keys := db.HKeys("nonexistent")
+	if keys != nil {
+		t.Fatal("expected nil for nonexistent key")
+	}
+}
+
+func TestHVals(t *testing.T) {
+	db := New()
+	db.HSet("h", "f1", []byte("v1"))
+	db.HSet("h", "f2", []byte("v2"))
+	db.HSet("h", "f3", []byte("v3"))
+
+	vals := db.HVals("h")
+	if len(vals) != 3 {
+		t.Fatalf("expected 3 values, got %d", len(vals))
+	}
+	for _, v := range vals {
+		v.Close()
+	}
+}
+
+func TestHValsEmpty(t *testing.T) {
+	db := New()
+	db.HSet("h", "f1", []byte("v1"))
+	db.HDel("h", "f1")
+
+	vals := db.HVals("h")
+	if len(vals) != 0 {
+		t.Fatalf("expected 0 values, got %d", len(vals))
+	}
+}
+
+func TestHValsNonExistent(t *testing.T) {
+	db := New()
+	vals := db.HVals("nonexistent")
+	if vals != nil {
+		t.Fatal("expected nil for nonexistent key")
+	}
+}
+
+// ============================================================================
+// ZSet 补充测试: ZPopMinNonExistent, ZPopMinCountExceeds, ZPopMaxEmpty,
+//                ZPopMaxNonExistent, ZRankNonExistent, ZRankKeyNotFound,
+//                ZRevRankNonExistent, ZRevRankKeyNotFound, ZIncrByNegative
+// ============================================================================
+
+func TestZPopMinNonExistent(t *testing.T) {
+	db := New()
+	zs := db.ZPopMin("nonexistent", 1)
+	if zs != nil {
+		t.Fatal("expected nil for nonexistent key")
+	}
+}
+
+func TestZPopMinCountExceeds(t *testing.T) {
+	db := New()
+	db.ZAdd("z", 1.0, []byte("a"))
+
+	zs := db.ZPopMin("z", 10)
+	if zs == nil {
+		t.Fatal("expected result, got nil")
+	}
+	if zs.Len() != 1 {
+		t.Fatalf("expected 1 element, got %d", zs.Len())
+	}
+	zs.Close()
+}
+
+func TestZPopMaxEmpty(t *testing.T) {
+	db := New()
+	zs := db.ZPopMax("z", 1)
+	if zs != nil {
+		t.Fatal("expected nil for empty set")
+	}
+}
+
+func TestZPopMaxNonExistent(t *testing.T) {
+	db := New()
+	zs := db.ZPopMax("nonexistent", 1)
+	if zs != nil {
+		t.Fatal("expected nil for nonexistent key")
+	}
+}
+
+func TestZRankNonExistent(t *testing.T) {
+	db := New()
+	db.ZAdd("z", 1.0, []byte("a"))
+
+	rank, ok := db.ZRank("z", []byte("nonexistent"))
+	if ok {
+		t.Fatalf("expected not found, got rank %d", rank)
+	}
+}
+
+func TestZRankKeyNotFound(t *testing.T) {
+	db := New()
+	rank, ok := db.ZRank("nonexistent", []byte("a"))
+	if ok {
+		t.Fatalf("expected not found, got rank %d", rank)
+	}
+}
+
+func TestZRevRankNonExistent(t *testing.T) {
+	db := New()
+	db.ZAdd("z", 1.0, []byte("a"))
+
+	rank, ok := db.ZRevRank("z", []byte("nonexistent"))
+	if ok {
+		t.Fatalf("expected not found, got rank %d", rank)
+	}
+}
+
+func TestZRevRankKeyNotFound(t *testing.T) {
+	db := New()
+	rank, ok := db.ZRevRank("nonexistent", []byte("a"))
+	if ok {
+		t.Fatalf("expected not found, got rank %d", rank)
+	}
+}
+
+func TestZIncrByNegative(t *testing.T) {
+	db := New()
+	db.ZAdd("z", 10.0, []byte("a"))
+
+	score := db.ZIncrBy("z", []byte("a"), -3.0)
+	if score != 7.0 {
+		t.Fatalf("expected score 7.0, got %f", score)
+	}
+}
+
+// ============================================================================
+// Stream 基础命令测试: XAdd, XRead, XReadGroup, XGroupCreate, XDel, XTrim, XLen
+// ============================================================================
+
+func TestXAdd(t *testing.T) {
+	db := New()
+
+	id := db.XAdd("s", "*", map[string]*PooledBuffer{"f": Buf("v")})
+	if id == "" {
+		t.Fatal("expected non-empty ID")
+	}
+}
+
+func TestXAddWithID(t *testing.T) {
+	db := New()
+
+	id := db.XAdd("s", "1-0", map[string]*PooledBuffer{"f": Buf("v")})
+	if id != "1-0" {
+		t.Fatalf("expected ID '1-0', got '%s'", id)
+	}
+}
+
+func TestXRead(t *testing.T) {
+	db := New()
+	db.XAdd("s", "1-0", map[string]*PooledBuffer{"f": Buf("v1")})
+	db.XAdd("s", "2-0", map[string]*PooledBuffer{"f": Buf("v2")})
+
+	result := db.XRead(map[string]string{"s": "0-0"}, 10)
+	if result == nil {
+		t.Fatal("expected result, got nil")
+	}
+	if len(result["s"]) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(result["s"]))
+	}
+}
+
+func TestXReadNonExistent(t *testing.T) {
+	db := New()
+	result := db.XRead(map[string]string{"nonexistent": "0-0"}, 10)
+	if result != nil && len(result) > 0 {
+		t.Fatal("expected empty result")
+	}
+}
+
+func TestXReadCountLimit(t *testing.T) {
+	db := New()
+	db.XAdd("s", "1-0", map[string]*PooledBuffer{"f": Buf("v1")})
+	db.XAdd("s", "2-0", map[string]*PooledBuffer{"f": Buf("v2")})
+	db.XAdd("s", "3-0", map[string]*PooledBuffer{"f": Buf("v3")})
+
+	result := db.XRead(map[string]string{"s": "0-0"}, 2)
+	if result == nil {
+		t.Fatal("expected result, got nil")
+	}
+	if len(result["s"]) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(result["s"]))
+	}
+}
+
+func TestXGroupCreate(t *testing.T) {
+	db := New()
+	db.XAdd("s", "1-0", map[string]*PooledBuffer{"f": Buf("v")})
+
+	err := db.XGroupCreate("s", "g", "0-0")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+}
+
+func TestXGroupCreateNonExistent(t *testing.T) {
+	db := New()
+	err := db.XGroupCreate("nonexistent", "g", "0-0")
+	if err == nil {
+		t.Fatal("expected error for nonexistent stream")
+	}
+}
+
+func TestXReadGroup(t *testing.T) {
+	db := New()
+	db.XAdd("s", "1-0", map[string]*PooledBuffer{"f": Buf("v1")})
+	db.XAdd("s", "2-0", map[string]*PooledBuffer{"f": Buf("v2")})
+	db.XGroupCreate("s", "g", "0-0")
+
+	result := db.XReadGroup("g", "c1", map[string]string{"s": ">"}, 10)
+	if result == nil {
+		t.Fatal("expected result, got nil")
+	}
+	if len(result["s"]) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(result["s"]))
+	}
+}
+
+func TestXReadGroupNonExistent(t *testing.T) {
+	db := New()
+	result := db.XReadGroup("g", "c", map[string]string{"nonexistent": ">"}, 10)
+	if result != nil && len(result) > 0 {
+		t.Fatal("expected empty result")
+	}
+}
+
+func TestXReadGroupPending(t *testing.T) {
+	db := New()
+	db.XAdd("s", "1-0", map[string]*PooledBuffer{"f": Buf("v")})
+	db.XGroupCreate("s", "g", "0-0")
+
+	db.XReadGroup("g", "c1", map[string]string{"s": ">"}, 10)
+
+	result := db.XReadGroup("g", "c1", map[string]string{"s": "0-0"}, 10)
+	if result == nil {
+		t.Fatal("expected result, got nil")
+	}
+	if len(result["s"]) != 1 {
+		t.Fatalf("expected 1 pending entry, got %d", len(result["s"]))
+	}
+}
+
+func TestXDel(t *testing.T) {
+	db := New()
+	db.XAdd("s", "1-0", map[string]*PooledBuffer{"f": Buf("v1")})
+	db.XAdd("s", "2-0", map[string]*PooledBuffer{"f": Buf("v2")})
+
+	n := db.XDel("s", []string{"1-0"})
+	if n != 1 {
+		t.Fatalf("expected 1 deleted, got %d", n)
+	}
+
+	if db.XLen("s") != 1 {
+		t.Fatalf("expected 1 entry remaining, got %d", db.XLen("s"))
+	}
+}
+
+func TestXDelNonExistent(t *testing.T) {
+	db := New()
+	n := db.XDel("nonexistent", []string{"1-0"})
+	if n != 0 {
+		t.Fatalf("expected 0 deleted, got %d", n)
+	}
+}
+
+func TestXDelInvalidID(t *testing.T) {
+	db := New()
+	db.XAdd("s", "1-0", map[string]*PooledBuffer{"f": Buf("v")})
+
+	n := db.XDel("s", []string{"999-0"})
+	if n != 0 {
+		t.Fatalf("expected 0 deleted, got %d", n)
+	}
+}
+
+func TestXTrim(t *testing.T) {
+	db := New()
+	db.XAdd("s", "1-0", map[string]*PooledBuffer{"f": Buf("v1")})
+	db.XAdd("s", "2-0", map[string]*PooledBuffer{"f": Buf("v2")})
+	db.XAdd("s", "3-0", map[string]*PooledBuffer{"f": Buf("v3")})
+
+	n := db.XTrim("s", 2)
+	if n != 1 {
+		t.Fatalf("expected 1 trimmed, got %d", n)
+	}
+
+	if db.XLen("s") != 2 {
+		t.Fatalf("expected 2 entries remaining, got %d", db.XLen("s"))
+	}
+}
+
+func TestXTrimNonExistent(t *testing.T) {
+	db := New()
+	n := db.XTrim("nonexistent", 10)
+	if n != 0 {
+		t.Fatalf("expected 0 trimmed, got %d", n)
+	}
+}
+
+func TestXTrimLargerThanSize(t *testing.T) {
+	db := New()
+	db.XAdd("s", "1-0", map[string]*PooledBuffer{"f": Buf("v")})
+
+	n := db.XTrim("s", 100)
+	if n != 0 {
+		t.Fatalf("expected 0 trimmed, got %d", n)
+	}
+}
+
+func TestXLen(t *testing.T) {
+	db := New()
+
+	if db.XLen("s") != 0 {
+		t.Fatalf("expected 0, got %d", db.XLen("s"))
+	}
+
+	db.XAdd("s", "1-0", map[string]*PooledBuffer{"f": Buf("v1")})
+	db.XAdd("s", "2-0", map[string]*PooledBuffer{"f": Buf("v2")})
+
+	if db.XLen("s") != 2 {
+		t.Fatalf("expected 2, got %d", db.XLen("s"))
+	}
+}
+
+func TestXLenNonExistent(t *testing.T) {
+	db := New()
+	if db.XLen("nonexistent") != 0 {
+		t.Fatalf("expected 0 for nonexistent stream, got %d", db.XLen("nonexistent"))
+	}
+}
+
+// ============================================================================
+// 键过期命令测试: Expire, PExpire, ExpireAt, PExpireAt, TTL, PTTL, Persist
+// ============================================================================
+
+func TestExpire(t *testing.T) {
+	db := New()
+	db.Set("key", []byte("value"))
+
+	ok := db.Expire("key", 100)
+	if !ok {
+		t.Fatal("expected Expire to succeed")
+	}
+
+	ttl := db.TTL("key")
+	if ttl <= 0 || ttl > 100 {
+		t.Fatalf("expected TTL > 0 and <= 100, got %d", ttl)
+	}
+}
+
+func TestExpireNonExistent(t *testing.T) {
+	db := New()
+	ok := db.Expire("nonexistent", 100)
+	if ok {
+		t.Fatal("expected Expire to fail for nonexistent key")
+	}
+}
+
+func TestPExpire(t *testing.T) {
+	db := New()
+	db.Set("key", []byte("value"))
+
+	ok := db.PExpire("key", 50000)
+	if !ok {
+		t.Fatal("expected PExpire to succeed")
+	}
+
+	pttl := db.PTTL("key")
+	if pttl <= 0 || pttl > 50000 {
+		t.Fatalf("expected PTTL > 0 and <= 50000, got %d", pttl)
+	}
+}
+
+func TestExpireAt(t *testing.T) {
+	db := New()
+	db.Set("key", []byte("value"))
+
+	futureTime := time.Now().Unix() + 3600
+	ok := db.ExpireAt("key", futureTime)
+	if !ok {
+		t.Fatal("expected ExpireAt to succeed")
+	}
+
+	ttl := db.TTL("key")
+	if ttl <= 0 || ttl > 3600 {
+		t.Fatalf("expected TTL > 0 and <= 3600, got %d", ttl)
+	}
+}
+
+func TestExpireAtPast(t *testing.T) {
+	db := New()
+	db.Set("key", []byte("value"))
+
+	pastTime := time.Now().Unix() - 1
+	ok := db.ExpireAt("key", pastTime)
+	if !ok {
+		t.Fatal("expected ExpireAt to succeed (key should be deleted)")
+	}
+
+	if db.Exists("key") {
+		t.Fatal("expected key to be deleted")
+	}
+}
+
+func TestPExpireAt(t *testing.T) {
+	db := New()
+	db.Set("key", []byte("value"))
+
+	futureTimeMs := time.Now().UnixMilli() + 60000
+	ok := db.PExpireAt("key", futureTimeMs)
+	if !ok {
+		t.Fatal("expected PExpireAt to succeed")
+	}
+
+	pttl := db.PTTL("key")
+	if pttl <= 0 || pttl > 60000 {
+		t.Fatalf("expected PTTL > 0 and <= 60000, got %d", pttl)
+	}
+}
+
+func TestTTL(t *testing.T) {
+	db := New()
+	db.Set("key", []byte("value"))
+	db.Expire("key", 100)
+
+	ttl := db.TTL("key")
+	if ttl <= 0 || ttl > 100 {
+		t.Fatalf("expected TTL > 0 and <= 100, got %d", ttl)
+	}
+}
+
+func TestTTLNonExistent(t *testing.T) {
+	db := New()
+	ttl := db.TTL("nonexistent")
+	if ttl != -1 {
+		t.Fatalf("expected TTL -1 for nonexistent key, got %d", ttl)
+	}
+}
+
+func TestTTLNoExpiry(t *testing.T) {
+	db := New()
+	db.Set("key", []byte("value"))
+
+	ttl := db.TTL("key")
+	if ttl != -2 {
+		t.Fatalf("expected TTL -2 for key without expiry, got %d", ttl)
+	}
+}
+
+func TestPTTL(t *testing.T) {
+	db := New()
+	db.Set("key", []byte("value"))
+	db.PExpire("key", 50000)
+
+	pttl := db.PTTL("key")
+	if pttl <= 0 || pttl > 50000 {
+		t.Fatalf("expected PTTL > 0 and <= 50000, got %d", pttl)
+	}
+}
+
+func TestPersist(t *testing.T) {
+	db := New()
+	db.Set("key", []byte("value"))
+	db.Expire("key", 100)
+
+	ok := db.Persist("key")
+	if !ok {
+		t.Fatal("expected Persist to succeed")
+	}
+
+	ttl := db.TTL("key")
+	if ttl != -2 {
+		t.Fatalf("expected TTL -2 after Persist, got %d", ttl)
+	}
+}
+
+func TestPersistNonExistent(t *testing.T) {
+	db := New()
+	ok := db.Persist("nonexistent")
+	if ok {
+		t.Fatal("expected Persist to fail for nonexistent key")
+	}
+}
+
+func TestPersistNoExpiry(t *testing.T) {
+	db := New()
+	db.Set("key", []byte("value"))
+
+	ok := db.Persist("key")
+	if ok {
+		t.Fatal("expected Persist to fail for key without expiry")
+	}
+}
+
+func TestKeyExpiration(t *testing.T) {
+	db := New()
+	db.Set("key", []byte("value"))
+
+	db.PExpire("key", 10)
+
+	time.Sleep(20 * time.Millisecond)
+
+	if db.Exists("key") {
+		t.Fatal("expected key to be expired and deleted")
+	}
+}
+
+func TestExpireAfterSet(t *testing.T) {
+	db := New()
+	db.Set("key", []byte("original"))
+	db.Expire("key", 10000)
+
+	val, ok := db.Get("key")
+	if !ok || val.String() != "original" {
+		t.Fatalf("expected 'original', got '%s', ok=%v", val.String(), ok)
+	}
+	val.Close()
+}
+
+func TestFlushAllClearsExpiry(t *testing.T) {
+	db := New()
+	db.Set("key1", []byte("value1"))
+	db.Set("key2", []byte("value2"))
+	db.Expire("key1", 10000)
+	db.Expire("key2", 10000)
+
+	db.FlushAll()
+
+	if db.Exists("key1") || db.Exists("key2") {
+		t.Fatal("expected all keys to be deleted after FlushAll")
+	}
+}

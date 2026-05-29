@@ -22,23 +22,29 @@
 
 package gedis
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 // RedisDB 是嵌入式 Redis-like 内存数据库的主结构。
 // 所有数据存储在 Arena 中，通过 Dict 索引，sync.RWMutex 保证并发安全。
 type RedisDB struct {
-	arena *Arena
-	dict  *Dict
-	mu    sync.RWMutex
+	arena  *Arena
+	dict   *Dict
+	expiry *Dict
+	mu     sync.RWMutex
 }
 
 // New 创建一个新的 RedisDB 实例。
 func New() *RedisDB {
 	arena := NewArena(0)
 	dict := NewDict(arena)
+	expiry := NewDict(arena)
 	return &RedisDB{
-		arena: arena,
-		dict:  dict,
+		arena:  arena,
+		dict:   dict,
+		expiry: expiry,
 	}
 }
 
@@ -54,16 +60,27 @@ func (db *RedisDB) Del(key string) bool {
 	}
 
 	db.FreeObject(headOff)
-	return db.dict.Del(keyBytes)
+	db.dict.Del(keyBytes)
+	db.expiry.Del(keyBytes)
+	return true
 }
 
-// Exists 检查 key 是否存在。
+// Exists 检查 key 是否存在（自动清理过期 key）。
 func (db *RedisDB) Exists(key string) bool {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
+	db.mu.Lock()
+	defer db.mu.Unlock()
 
-	_, ok := db.dict.Get([]byte(key))
-	return ok
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+	if !ok {
+		return false
+	}
+
+	if db.isExpired(keyBytes, headOff) {
+		db.deleteExpiredKey(keyBytes, headOff)
+		return false
+	}
+	return true
 }
 
 // FlushAll 清空所有数据，重置 Arena 和 Dict。
@@ -73,4 +90,166 @@ func (db *RedisDB) FlushAll() {
 
 	db.arena.Reset()
 	db.dict = NewDict(db.arena)
+	db.expiry = NewDict(db.arena)
+}
+
+// isExpired 检查 key 是否已过期。
+func (db *RedisDB) isExpired(keyBytes []byte, headOff int) bool {
+	expTimeOff, ok := db.expiry.Get(keyBytes)
+	if !ok {
+		return false
+	}
+	expTime := int64(db.arena.ReadUint64(expTimeOff))
+	return currentTimeMs() >= expTime
+}
+
+// deleteExpiredKey 删除过期 key 及其关联数据。
+func (db *RedisDB) deleteExpiredKey(keyBytes []byte, headOff int) {
+	db.FreeObject(headOff)
+	db.dict.Del(keyBytes)
+	db.expiry.Del(keyBytes)
+}
+
+// currentTimeMs 返回当前时间戳（毫秒）。
+func currentTimeMs() int64 {
+	return (int64)(time.Now().UnixNano() / 1000000)
+}
+
+// Expire 设置 key 的过期时间（秒）。
+// 返回 true 表示设置成功，false 表示 key 不存在。
+func (db *RedisDB) Expire(key string, seconds int64) bool {
+	return db.PExpire(key, seconds*1000)
+}
+
+// PExpire 设置 key 的过期时间（毫秒）。
+// 返回 true 表示设置成功，false 表示 key 不存在。
+func (db *RedisDB) PExpire(key string, milliseconds int64) bool {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+	if !ok {
+		return false
+	}
+
+	if db.isExpired(keyBytes, headOff) {
+		db.deleteExpiredKey(keyBytes, headOff)
+		return false
+	}
+
+	expTime := currentTimeMs() + milliseconds
+	expTimeOff := db.arena.Alloc(8)
+	db.arena.WriteUint64(expTimeOff, uint64(expTime))
+	db.expiry.Set(keyBytes, expTimeOff)
+	return true
+}
+
+// ExpireAt 设置 key 在指定时间戳过期（秒）。
+func (db *RedisDB) ExpireAt(key string, timestamp int64) bool {
+	return db.PExpireAt(key, timestamp*1000)
+}
+
+// PExpireAt 设置 key 在指定时间戳过期（毫秒）。
+func (db *RedisDB) PExpireAt(key string, timestampMs int64) bool {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+	if !ok {
+		return false
+	}
+
+	if timestampMs <= currentTimeMs() {
+		db.deleteExpiredKey(keyBytes, headOff)
+		return true
+	}
+
+	expTimeOff := db.arena.Alloc(8)
+	db.arena.WriteUint64(expTimeOff, uint64(timestampMs))
+	db.expiry.Set(keyBytes, expTimeOff)
+	return true
+}
+
+// TTL 返回 key 的剩余生存时间（秒）。
+// 返回 -1 表示 key 不存在，-2 表示 key 没有设置过期时间。
+func (db *RedisDB) TTL(key string) int64 {
+	pttl := db.PTTL(key)
+	if pttl < 0 {
+		return pttl
+	}
+	return pttl / 1000
+}
+
+// PTTL 返回 key 的剩余生存时间（毫秒）。
+// 返回 -1 表示 key 不存在，-2 表示 key 没有设置过期时间。
+func (db *RedisDB) PTTL(key string) int64 {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+	if !ok {
+		return -1
+	}
+
+	expTimeOff, hasExpiry := db.expiry.Get(keyBytes)
+	if !hasExpiry {
+		return -2
+	}
+
+	expTime := int64(db.arena.ReadUint64(expTimeOff))
+	remain := expTime - currentTimeMs()
+	if remain <= 0 {
+		db.deleteExpiredKey(keyBytes, headOff)
+		return -1
+	}
+	return remain
+}
+
+// Persist 移除 key 的过期时间，使其永久存在。
+// 返回 true 表示移除成功，false 表示 key 不存在或没有过期时间。
+func (db *RedisDB) Persist(key string) bool {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	keyBytes := []byte(key)
+	if _, ok := db.dict.Get(keyBytes); !ok {
+		return false
+	}
+
+	if _, hasExpiry := db.expiry.Get(keyBytes); !hasExpiry {
+		return false
+	}
+
+	db.expiry.Del(keyBytes)
+	return true
+}
+
+// GetEx 设置 key 的值并返回，同时可选地设置过期时间。
+func (db *RedisDB) GetEx(key string, value []byte, expireMs int64) bool {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+	if ok {
+		if db.isExpired(keyBytes, headOff) {
+			db.deleteExpiredKey(keyBytes, headOff)
+			ok = false
+		}
+	}
+
+	if !ok {
+		return false
+	}
+
+	db.Set(key, value)
+	if expireMs > 0 {
+		db.PExpire(key, expireMs)
+	} else if expireMs == -1 {
+		db.Persist(key)
+	}
+	return true
 }

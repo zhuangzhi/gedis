@@ -22,6 +22,11 @@
 
 package gedis
 
+import (
+	"strconv"
+	"time"
+)
+
 // ZAdd 向有序集合中添加成员及其分数。对外友好 API，member 入参 []byte。
 func (db *RedisDB) ZAdd(key string, score float64, member []byte) int {
 	pb := BufFromBytes(member)
@@ -477,7 +482,168 @@ func (db *RedisDB) ZCard(key string) int {
 		return zsl.length
 	}
 
+	if enc == ObjEncodingZiplist {
+		n := ziplistLen(db.arena, dataOff)
+		return n / 2
+	}
+
 	return 0
+}
+
+func (db *RedisDB) ZCount(key string, min, max float64) int {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+	if !ok {
+		return 0
+	}
+
+	enc := db.ObjectEncoding(headOff)
+	dataOff := db.ObjectDataOffset(headOff)
+
+	count := 0
+	if enc == ObjEncodingSkiplist {
+		zsl := zslLoadFromArena(db.arena, dataOff)
+		x := int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, zsl.headerOff, 0)))
+		for x != 0 {
+			score := db.arena.ReadFloat64(zslNodeScoreOff(db.arena, x))
+			if score >= min && score <= max {
+				count++
+			}
+			if score > max {
+				break
+			}
+			x = int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, x, 0)))
+		}
+	} else if enc == ObjEncodingZiplist {
+		zlOff := dataOff
+		n := ziplistLen(db.arena, zlOff)
+		pos := zlOff + ziplistHeaderSize
+		for i := 0; i < n; i += 2 {
+			v := ziplistGet(db.arena, zlOff, i+1)
+			score, _ := strconv.ParseFloat(string(v), 64)
+			if score >= min && score <= max {
+				count++
+			}
+			pos += ziplistEntryTotalSize(db.arena, pos)
+			pos += ziplistEntryTotalSize(db.arena, pos)
+		}
+	}
+
+	return count
+}
+
+func (db *RedisDB) ZLexCount(key string, min, max string) int {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+	if !ok {
+		return 0
+	}
+
+	enc := db.ObjectEncoding(headOff)
+	dataOff := db.ObjectDataOffset(headOff)
+
+	count := 0
+	if enc == ObjEncodingSkiplist {
+		zsl := zslLoadFromArena(db.arena, dataOff)
+		x := int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, zsl.headerOff, 0)))
+		for x != 0 {
+			xMemberOff := int(db.arena.ReadUint32(zslNodeMemberOff(db.arena, x)))
+			member := db.arena.ReadBytes(xMemberOff, db.arena.SizeAt(xMemberOff))
+			memberStr := string(member)
+
+			minOk := true
+			if len(min) > 0 && min != "-" {
+				if min[0] == '(' {
+					minOk = memberStr > min[1:]
+				} else {
+					minOk = memberStr >= min
+				}
+			}
+
+			maxOk := true
+			if len(max) > 0 && max != "+" {
+				if max[0] == '(' {
+					maxOk = memberStr < max[1:]
+				} else {
+					maxOk = memberStr <= max
+				}
+			}
+
+			if minOk && maxOk {
+				count++
+			}
+
+			if memberStr > max && max != "+" {
+				break
+			}
+			x = int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, x, 0)))
+		}
+	}
+
+	return count
+}
+
+func (db *RedisDB) ZRangeByLex(key string, min, max string) *ZSlices {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+	if !ok {
+		return nil
+	}
+
+	enc := db.ObjectEncoding(headOff)
+	dataOff := db.ObjectDataOffset(headOff)
+
+	if enc == ObjEncodingSkiplist {
+		zsl := zslLoadFromArena(db.arena, dataOff)
+		result := NewZSlices()
+
+		x := int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, zsl.headerOff, 0)))
+		for x != 0 {
+			xMemberOff := int(db.arena.ReadUint32(zslNodeMemberOff(db.arena, x)))
+			member := db.arena.ReadBytes(xMemberOff, db.arena.SizeAt(xMemberOff))
+			memberStr := string(member)
+
+			minOk := true
+			if len(min) > 0 && min != "-" {
+				if min[0] == '(' {
+					minOk = memberStr > min[1:]
+				} else {
+					minOk = memberStr >= min
+				}
+			}
+
+			maxOk := true
+			if len(max) > 0 && max != "+" {
+				if max[0] == '(' {
+					maxOk = memberStr < max[1:]
+				} else {
+					maxOk = memberStr <= max
+				}
+			}
+
+			if minOk && maxOk {
+				result.Add(member)
+			}
+
+			if memberStr > max && max != "+" {
+				break
+			}
+			x = int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, x, 0)))
+		}
+		result.Finish()
+		return result
+	}
+
+	return nil
 }
 
 func zslLoadFromArena(arena *Arena, dataOff int) ZSkipList {
@@ -494,4 +660,302 @@ func zslSaveToArena(arena *Arena, dataOff int, zsl *ZSkipList) {
 	arena.WriteUint32(dataOff+4, uint32(zsl.tailOff))
 	arena.WriteUint32(dataOff+8, uint32(zsl.length))
 	arena.WriteUint32(dataOff+12, uint32(zsl.level))
+}
+
+func (db *RedisDB) ZRank(key string, member []byte) (int, bool) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+	if !ok {
+		return 0, false
+	}
+
+	enc := db.ObjectEncoding(headOff)
+	dataOff := db.ObjectDataOffset(headOff)
+
+	if enc == ObjEncodingSkiplist {
+		zsl := zslLoadFromArena(db.arena, dataOff)
+		memberOff := db.arena.AllocBytes(member)
+		defer db.arena.Free(memberOff)
+
+		score, ok := db.ZScoreBuffer(key, BufFromBytes(member))
+		if !ok {
+			return 0, false
+		}
+
+		rank := zslGetRank(db.arena, &zsl, memberOff, score)
+		if rank == 0 {
+			return 0, false
+		}
+		return rank - 1, true
+	}
+	return 0, false
+}
+
+func (db *RedisDB) ZRevRank(key string, member []byte) (int, bool) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+	if !ok {
+		return 0, false
+	}
+
+	enc := db.ObjectEncoding(headOff)
+	dataOff := db.ObjectDataOffset(headOff)
+
+	if enc == ObjEncodingSkiplist {
+		zsl := zslLoadFromArena(db.arena, dataOff)
+		score, ok := db.ZScoreBuffer(key, BufFromBytes(member))
+		if !ok {
+			return 0, false
+		}
+
+		memberOff := db.arena.AllocBytes(member)
+		defer db.arena.Free(memberOff)
+
+		rank := zslGetRank(db.arena, &zsl, memberOff, score)
+		if rank == 0 {
+			return 0, false
+		}
+		return zsl.length - rank, true
+	}
+	return 0, false
+}
+
+func (db *RedisDB) ZIncrBy(key string, member []byte, delta float64) float64 {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+
+	if !ok {
+		zlOff := ziplistNew(db.arena)
+		zlOff = ziplistInsert(db.arena, zlOff, member, false)
+		scoreStr := strconv.FormatFloat(delta, 'f', -1, 64)
+		zlOff = ziplistInsert(db.arena, zlOff, []byte(scoreStr), false)
+		headOff = db.NewObject(ObjZSet, ObjEncodingZiplist, zlOff)
+		db.dict.Set(keyBytes, headOff)
+		return delta
+	}
+
+	enc := db.ObjectEncoding(headOff)
+	dataOff := db.ObjectDataOffset(headOff)
+
+	if enc == ObjEncodingSkiplist {
+		zsl := zslLoadFromArena(db.arena, dataOff)
+		var existingScore float64
+		var found bool
+
+		x := int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, zsl.headerOff, 0)))
+		for x != 0 {
+			xScore := db.arena.ReadFloat64(zslNodeScoreOff(db.arena, x))
+			xMemberOff := int(db.arena.ReadUint32(zslNodeMemberOff(db.arena, x)))
+			xMember := db.arena.ReadBytes(xMemberOff, db.arena.SizeAt(xMemberOff))
+			if bytesEqual(xMember, member) {
+				existingScore = xScore
+				found = true
+				break
+			}
+			x = int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, x, 0)))
+		}
+
+		if !found {
+			newScore := delta
+			memberOff := db.arena.AllocBytes(member)
+			zslInsert(db.arena, &zsl, memberOff, newScore)
+			zslSaveToArena(db.arena, dataOff, &zsl)
+			return newScore
+		}
+		newScore := existingScore + delta
+		memberOff := db.arena.AllocBytes(member)
+		zslDelete(db.arena, &zsl, memberOff, existingScore)
+		zslInsert(db.arena, &zsl, memberOff, newScore)
+		zslSaveToArena(db.arena, dataOff, &zsl)
+		return newScore
+	}
+
+	if enc == ObjEncodingZiplist {
+		zlOff := dataOff
+		n := ziplistLen(db.arena, zlOff)
+		pos := zlOff + ziplistHeaderSize
+		for i := 0; i < n; i += 2 {
+			if ziplistEntryDataEquals(db.arena, pos, member) {
+				valBytes := ziplistGet(db.arena, zlOff, i+1)
+				oldScore, _ := strconv.ParseFloat(string(valBytes), 64)
+				newScore := oldScore + delta
+				newScoreStr := strconv.FormatFloat(newScore, 'f', -1, 64)
+				zlOff = ziplistDelete(db.arena, zlOff, i+1)
+				zlOff = ziplistInsertAt(db.arena, zlOff, i+1, []byte(newScoreStr))
+				db.ObjectSetDataOffset(headOff, zlOff)
+				return newScore
+			}
+			pos += ziplistEntryTotalSize(db.arena, pos)
+			pos += ziplistEntryTotalSize(db.arena, pos)
+		}
+		newScore := delta
+		zlOff = ziplistInsert(db.arena, zlOff, member, false)
+		scoreStr := strconv.FormatFloat(newScore, 'f', -1, 64)
+		zlOff = ziplistInsert(db.arena, zlOff, []byte(scoreStr), false)
+		db.ObjectSetDataOffset(headOff, zlOff)
+		return newScore
+	}
+	return delta
+}
+
+func (db *RedisDB) ZPopMin(key string, count int) *ZSlices {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+	if !ok {
+		return nil
+	}
+
+	enc := db.ObjectEncoding(headOff)
+	dataOff := db.ObjectDataOffset(headOff)
+
+	result := NewZSlices()
+	if enc == ObjEncodingSkiplist {
+		zsl := zslLoadFromArena(db.arena, dataOff)
+		for i := 0; i < count && zsl.length > 0; i++ {
+			x := int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, zsl.headerOff, 0)))
+			if x == 0 {
+				break
+			}
+			memberOff := int(db.arena.ReadUint32(zslNodeMemberOff(db.arena, x)))
+			score := db.arena.ReadFloat64(zslNodeScoreOff(db.arena, x))
+			member := db.arena.ReadBytes(memberOff, db.arena.SizeAt(memberOff))
+			result.Add(member)
+			zslDelete(db.arena, &zsl, memberOff, score)
+		}
+		zslSaveToArena(db.arena, dataOff, &zsl)
+		if zsl.length == 0 {
+			db.dict.Del(keyBytes)
+			db.FreeObject(headOff)
+		}
+	}
+	result.Finish()
+	return result
+}
+
+func (db *RedisDB) BZMPop(timeoutSeconds int, numKeys int, keys []string, where string) (string, *PooledBuffer, float64, bool) {
+	for t := 0; t < timeoutSeconds*10; t++ {
+		for _, key := range keys {
+			var member *PooledBuffer
+			var score float64
+			var found bool
+
+			db.mu.Lock()
+			keyBytes := []byte(key)
+			headOff, ok := db.dict.Get(keyBytes)
+			if ok {
+				enc := db.ObjectEncoding(headOff)
+				dataOff := db.ObjectDataOffset(headOff)
+
+				if enc == ObjEncodingSkiplist {
+					zsl := zslLoadFromArena(db.arena, dataOff)
+					if zsl.length > 0 {
+						var nodeOff int
+						if where == "MIN" {
+							nodeOff = int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, zsl.headerOff, 0)))
+						} else {
+							nodeOff = zsl.tailOff
+						}
+						if nodeOff != 0 {
+							memberOff := int(db.arena.ReadUint32(zslNodeMemberOff(db.arena, nodeOff)))
+							m := db.arena.ReadBytes(memberOff, db.arena.SizeAt(memberOff))
+							score = db.arena.ReadFloat64(zslNodeScoreOff(db.arena, nodeOff))
+							member = NewBuf(len(m))
+							member.buf.Write(m)
+
+							zslDelete(db.arena, &zsl, memberOff, score)
+							zslSaveToArena(db.arena, dataOff, &zsl)
+							if zsl.length == 0 {
+								db.dict.Del(keyBytes)
+								db.FreeObject(headOff)
+							} else {
+								db.ObjectSetDataOffset(headOff, dataOff)
+							}
+							found = true
+						}
+					}
+				}
+			}
+			db.mu.Unlock()
+
+			if found {
+				return key, member, score, true
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return "", nil, 0, false
+}
+
+func (db *RedisDB) ZPopMax(key string, count int) *ZSlices {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+	if !ok {
+		return nil
+	}
+
+	enc := db.ObjectEncoding(headOff)
+	dataOff := db.ObjectDataOffset(headOff)
+
+	result := NewZSlices()
+	if enc == ObjEncodingSkiplist {
+		zsl := zslLoadFromArena(db.arena, dataOff)
+
+		type nodeInfo struct {
+			off   int
+			score float64
+		}
+		nodes := make([]nodeInfo, 0, zsl.length)
+		x := int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, zsl.headerOff, 0)))
+		for x != 0 {
+			score := db.arena.ReadFloat64(zslNodeScoreOff(db.arena, x))
+			nodes = append(nodes, nodeInfo{off: x, score: score})
+			x = int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, x, 0)))
+		}
+
+		sortByScoreDesc := make([]nodeInfo, len(nodes))
+		copy(sortByScoreDesc, nodes)
+		for i := 0; i < len(sortByScoreDesc)-1; i++ {
+			for j := i + 1; j < len(sortByScoreDesc); j++ {
+				if sortByScoreDesc[j].score > sortByScoreDesc[i].score {
+					sortByScoreDesc[i], sortByScoreDesc[j] = sortByScoreDesc[j], sortByScoreDesc[i]
+				}
+			}
+		}
+
+		popCount := count
+		if popCount > len(sortByScoreDesc) {
+			popCount = len(sortByScoreDesc)
+		}
+		for i := 0; i < popCount; i++ {
+			nodeOff := sortByScoreDesc[i].off
+			memberOff := int(db.arena.ReadUint32(zslNodeMemberOff(db.arena, nodeOff)))
+			score := db.arena.ReadFloat64(zslNodeScoreOff(db.arena, nodeOff))
+			member := db.arena.ReadBytes(memberOff, db.arena.SizeAt(memberOff))
+			result.Add(member)
+			zslDelete(db.arena, &zsl, memberOff, score)
+		}
+
+		zslSaveToArena(db.arena, dataOff, &zsl)
+		if zsl.length == 0 {
+			db.dict.Del(keyBytes)
+			db.FreeObject(headOff)
+		}
+	}
+	result.Finish()
+	return result
 }

@@ -22,7 +22,10 @@
 
 package gedis
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"strconv"
+)
 
 // Ziplist 是一个双端紧凑列表结构，用于 List、Hash、小 ZSet。
 // 格式:
@@ -126,14 +129,20 @@ func ziplistEntryEncoding(arena *Arena, entryOff int) (isString bool, length int
 		size := int(binary.BigEndian.Uint32(arena.GetSlice(entryOff+1, 4)))
 		return true, size, 5
 	}
-	if b <= 0xDF {
+	if b >= 0xF0 && b <= 0xFC {
 		return false, 0, 1
 	}
-	if b <= 0xEF {
-		return false, 0, 1
+	if b == 0xFE {
+		return false, 0, 2
 	}
-	if b <= 0xFF {
-		return false, 0, 1
+	if b == 0xC0 {
+		return false, 0, 3
+	}
+	if b == 0xD0 {
+		return false, 0, 5
+	}
+	if b == 0xE0 {
+		return false, 0, 9
 	}
 	return true, int(b), 1
 }
@@ -166,7 +175,7 @@ func ziplistWriteEntryInt(arena *Arena, entryOff int, prevLen int, val int64) in
 	pos += ziplistWritePrevLen(arena, pos, prevLen)
 
 	if val >= 0 && val <= 12 {
-		arena.WriteByte(pos, byte(0xF1+val-1))
+		arena.WriteByte(pos, byte(0xF0+val))
 		pos++
 	} else if val >= mathMinInt8 && val <= mathMaxInt8 {
 		arena.WriteByte(pos, 0xFE)
@@ -191,8 +200,8 @@ func ziplistWriteEntryInt(arena *Arena, entryOff int, prevLen int, val int64) in
 // ziplistReadEntryInt 从 entry 读取整数值。返回值和 encoding 的字节数。
 func ziplistReadEntryInt(arena *Arena, entryOff int, prevLenSize int) (int64, int) {
 	b := arena.ReadByte(entryOff + prevLenSize)
-	if b >= 0xF1 && b <= 0xFD {
-		return int64(b - 0xF1 + 1), 1
+	if b >= 0xF0 && b <= 0xFC {
+		return int64(b - 0xF0), 1
 	}
 	switch b {
 	case 0xFE:
@@ -215,9 +224,7 @@ func ziplistReadEntryData(arena *Arena, entryOff int) []byte {
 		return arena.ReadBytes(entryOff+prevLenSize+encSize, length)
 	}
 	val, _ := ziplistReadEntryInt(arena, entryOff, prevLenSize)
-	buf := make([]byte, 8)
-	binary.LittleEndian.PutUint64(buf, uint64(val))
-	return buf
+	return []byte(strconv.FormatInt(val, 10))
 }
 
 // ziplistEntryDataEquals 零分配比较 entry 数据与给定字节切片是否相等。
@@ -255,6 +262,53 @@ func ziplistEntrySize(prevLen int, data []byte) int {
 		encSize = 5
 	}
 	return plSize + encSize + len(data)
+}
+
+func ziplistEntryIntSize(prevLen int, val int64) int {
+	plSize := 1
+	if prevLen >= ziplistMaxPrevLen {
+		plSize = 5
+	}
+	var encSize int
+	if val >= 0 && val <= 12 {
+		encSize = 1
+	} else if val >= mathMinInt8 && val <= mathMaxInt8 {
+		encSize = 2
+	} else if val >= mathMinInt16 && val <= mathMaxInt16 {
+		encSize = 3
+	} else if val >= mathMinInt32 && val <= mathMaxInt32 {
+		encSize = 5
+	} else {
+		encSize = 9
+	}
+	return plSize + encSize
+}
+
+func parseInteger(data []byte) (int64, bool) {
+	if len(data) == 0 {
+		return 0, false
+	}
+	var val int64
+	var neg bool
+	if data[0] == '-' {
+		neg = true
+		data = data[1:]
+	} else if data[0] == '+' {
+		data = data[1:]
+	}
+	if len(data) == 0 {
+		return 0, false
+	}
+	for _, b := range data {
+		if b < '0' || b > '9' {
+			return 0, false
+		}
+		val = val*10 + int64(b-'0')
+	}
+	if neg {
+		val = -val
+	}
+	return val, true
 }
 
 // ziplistEntryTotalSize 返回 entry 总字节数（prevLen + encoding + data）。
@@ -322,7 +376,15 @@ func ziplistInsert(arena *Arena, zlOff int, data []byte, atHead bool) int {
 		prevLen = ziplistEntryTotalSize(arena, oldZlOff+tailRelOff)
 	}
 
-	entrySize := ziplistEntrySize(prevLen, data)
+	var entrySize int
+	var useIntEncoding bool
+	var intVal int64
+
+	if intVal, useIntEncoding = parseInteger(data); useIntEncoding {
+		entrySize = ziplistEntryIntSize(prevLen, intVal)
+	} else {
+		entrySize = ziplistEntrySize(prevLen, data)
+	}
 	newSize := oldSize + entrySize
 	zlOff = ziplistResize(arena, zlOff, newSize)
 
@@ -332,7 +394,11 @@ func ziplistInsert(arena *Arena, zlOff int, data []byte, atHead bool) int {
 		arena.WriteBytes(absInsertPos+entrySize, arena.GetSlice(absInsertPos, remainSize))
 	}
 
-	ziplistWriteEntry(arena, absInsertPos, prevLen, data)
+	if useIntEncoding {
+		ziplistWriteEntryInt(arena, absInsertPos, prevLen, intVal)
+	} else {
+		ziplistWriteEntry(arena, absInsertPos, prevLen, data)
+	}
 
 	if num > 0 {
 		nextEntryOff := absInsertPos + entrySize

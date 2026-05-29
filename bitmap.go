@@ -148,6 +148,62 @@ func (db *RedisDB) BitCount(key string, start, end int) int {
 	return count
 }
 
+// BitPos 查找第一个指定位值（0 或 1）的位置。
+// start 和 end 指定字节范围（包含），负数表示从末尾计算。
+// 如果 bit 为 1，返回第一个 1 的位置；如果全为 0，返回 -1。
+func (db *RedisDB) BitPos(key string, bit int, start, end int) int {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	headOff, ok := db.dict.Get([]byte(key))
+	if !ok {
+		if bit == 0 {
+			return 0
+		}
+		return -1
+	}
+
+	data := db.getRawData(headOff)
+	if data == nil {
+		if bit == 0 {
+			return 0
+		}
+		return -1
+	}
+
+	size := len(data)
+	if start < 0 {
+		start = size + start
+	}
+	if end < 0 {
+		end = size + end
+	}
+	if start < 0 {
+		start = 0
+	}
+	if end >= size {
+		end = size - 1
+	}
+	if start > end {
+		return -1
+	}
+
+	for i := start; i <= end; i++ {
+		byteVal := data[i]
+		for j := 0; j < 8; j++ {
+			bitIdx := 7 - j
+			if ((byteVal >> bitIdx) & 1) == byte(bit) {
+				return i*8 + j
+			}
+		}
+	}
+
+	if bit == 0 {
+		return (end + 1) * 8
+	}
+	return -1
+}
+
 // BitOp 对多个位图执行位运算（AND、OR、XOR、NOT），结果存入目标键。
 func (db *RedisDB) BitOp(op string, destKey string, srcKeys ...string) int {
 	db.mu.Lock()

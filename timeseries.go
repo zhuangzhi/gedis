@@ -43,7 +43,8 @@ func tsMetaLastChunk(dataOff int) int   { return dataOff + 4 }
 func tsMetaCount(dataOff int) int       { return dataOff + 8 }
 func tsMetaMinTs(dataOff int) int       { return dataOff + 12 }
 func tsMetaMaxTs(dataOff int) int       { return dataOff + 20 }
-func tsMetaLabels(dataOff int) int      { return dataOff + 28 }
+func tsMetaLabelsOff(dataOff int) int   { return dataOff + 28 }
+func tsMetaLabelsCount(dataOff int) int  { return dataOff + 32 }
 
 func tsChunkPrev(chunkOff int) int      { return chunkOff }
 func tsChunkNext(chunkOff int) int      { return chunkOff + 4 }
@@ -104,6 +105,105 @@ func (db *RedisDB) TSAdd(key string, ts int64, val float64) int {
 	}
 
 	return int(totalCount + 1)
+}
+
+// TSAddWithLabels 向时间序列添加采样点并设置标签。
+func (db *RedisDB) TSAddWithLabels(key string, ts int64, val float64, labels map[string]string) int {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+
+	if !ok {
+		chunkOff := db.tsNewChunk()
+		db.tsChunkAddSample(chunkOff, 0, ts, val)
+
+		dataOff := db.arena.Alloc(tsMetaBaseSize)
+		db.arena.WriteUint32(tsMetaFirstChunk(dataOff), uint32(chunkOff))
+		db.arena.WriteUint32(tsMetaLastChunk(dataOff), uint32(chunkOff))
+		db.arena.WriteUint32(tsMetaCount(dataOff), 1)
+		db.arena.WriteUint64(tsMetaMinTs(dataOff), uint64(ts))
+		db.arena.WriteUint64(tsMetaMaxTs(dataOff), uint64(ts))
+
+		zlOff := db.tsNewLabelsZiplist(labels)
+		db.arena.WriteUint32(tsMetaLabelsOff(dataOff), uint32(zlOff))
+		db.arena.WriteUint32(tsMetaLabelsCount(dataOff), uint32(len(labels)))
+
+		headOff = db.NewObject(ObjTS, ObjEncodingRaw, dataOff)
+		db.dict.Set(keyBytes, headOff)
+		return 1
+	}
+
+	dataOff := db.ObjectDataOffset(headOff)
+	lastChunkOff := int(db.arena.ReadUint32(tsMetaLastChunk(dataOff)))
+	count := int(db.arena.ReadUint32(tsChunkCount(lastChunkOff)))
+
+	if count >= tsMaxSamples {
+		newChunkOff := db.tsNewChunk()
+		db.arena.WriteUint32(tsChunkPrev(newChunkOff), uint32(lastChunkOff))
+		db.arena.WriteUint32(tsChunkNext(lastChunkOff), uint32(newChunkOff))
+		lastChunkOff = newChunkOff
+		db.arena.WriteUint32(tsMetaLastChunk(dataOff), uint32(lastChunkOff))
+		count = 0
+	}
+
+	db.tsChunkAddSample(lastChunkOff, count, ts, val)
+
+	totalCount := db.arena.ReadUint32(tsMetaCount(dataOff))
+	db.arena.WriteUint32(tsMetaCount(dataOff), totalCount+1)
+
+	minTs := int64(db.arena.ReadUint64(tsMetaMinTs(dataOff)))
+	maxTs := int64(db.arena.ReadUint64(tsMetaMaxTs(dataOff)))
+	if ts < minTs {
+		db.arena.WriteUint64(tsMetaMinTs(dataOff), uint64(ts))
+	}
+	if ts > maxTs {
+		db.arena.WriteUint64(tsMetaMaxTs(dataOff), uint64(ts))
+	}
+
+	return int(totalCount + 1)
+}
+
+// TSGetLabels 获取时间序列的标签。
+func (db *RedisDB) TSGetLabels(key string) map[string]string {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	headOff, ok := db.dict.Get([]byte(key))
+	if !ok {
+		return nil
+	}
+
+	dataOff := db.ObjectDataOffset(headOff)
+	zlOff := int(db.arena.ReadUint32(tsMetaLabelsOff(dataOff)))
+	if zlOff == 0 {
+		return nil
+	}
+
+	labels := make(map[string]string)
+	n := ziplistLen(db.arena, zlOff)
+	pos := zlOff + ziplistHeaderSize
+	for i := 0; i < n; i += 2 {
+		kBytes := ziplistGet(db.arena, zlOff, i)
+		vBytes := ziplistGet(db.arena, zlOff, i+1)
+		if kBytes != nil && vBytes != nil {
+			labels[string(kBytes)] = string(vBytes)
+		}
+		pos += ziplistEntryTotalSize(db.arena, pos)
+		pos += ziplistEntryTotalSize(db.arena, pos)
+	}
+	return labels
+}
+
+// tsNewLabelsZiplist 创建一个新的标签 ziplist。
+func (db *RedisDB) tsNewLabelsZiplist(labels map[string]string) int {
+	zlOff := ziplistNew(db.arena)
+	for k, v := range labels {
+		zlOff = ziplistInsert(db.arena, zlOff, []byte(k), false)
+		zlOff = ziplistInsert(db.arena, zlOff, []byte(v), false)
+	}
+	return zlOff
 }
 
 // TSRange 查询时间序列在指定时间范围内的采样点。

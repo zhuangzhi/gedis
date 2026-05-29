@@ -224,6 +224,114 @@ func (db *RedisDB) XGroupCreate(key, group, startID string) error {
 	return nil
 }
 
+func (db *RedisDB) XDel(key string, ids []string) int {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+	if !ok {
+		return 0
+	}
+
+	dataOff := db.ObjectDataOffset(headOff)
+	deleted := 0
+
+	for _, id := range ids {
+		ms, seq := parseStreamID(id)
+
+		entOff := int(db.arena.ReadUint32(streamFirstEntry(dataOff)))
+		for entOff != 0 {
+			eMs := db.arena.ReadUint64(streamEntryMs(entOff))
+			eSeq := db.arena.ReadUint64(streamEntrySeq(entOff))
+
+			if eMs == ms && eSeq == seq {
+				prevOff := int(db.arena.ReadUint32(streamEntryPrev(entOff)))
+				nextOff := int(db.arena.ReadUint32(streamEntryNext(entOff)))
+
+				if prevOff != 0 {
+					db.arena.WriteUint32(streamEntryNext(prevOff), uint32(nextOff))
+				} else {
+					db.arena.WriteUint32(streamFirstEntry(dataOff), uint32(nextOff))
+				}
+
+				if nextOff != 0 {
+					db.arena.WriteUint32(streamEntryPrev(nextOff), uint32(prevOff))
+				} else {
+					db.arena.WriteUint32(streamLastEntry(dataOff), uint32(prevOff))
+				}
+
+				db.arena.Free(entOff)
+				deleted++
+
+				count := int(db.arena.ReadUint32(streamEntryCount(dataOff)))
+				db.arena.WriteUint32(streamEntryCount(dataOff), uint32(count-1))
+				break
+			}
+
+			entOff = int(db.arena.ReadUint32(streamEntryNext(entOff)))
+		}
+	}
+
+	if int(db.arena.ReadUint32(streamEntryCount(dataOff))) == 0 {
+		db.dict.Del(keyBytes)
+		db.FreeObject(headOff)
+	}
+
+	return deleted
+}
+
+func (db *RedisDB) XTrim(key string, maxLen int) int {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+	if !ok {
+		return 0
+	}
+
+	dataOff := db.ObjectDataOffset(headOff)
+	originalCount := int(db.arena.ReadUint32(streamEntryCount(dataOff)))
+
+	if originalCount <= maxLen {
+		return 0
+	}
+
+	removed := 0
+	targetRemove := originalCount - maxLen
+
+	for removed < targetRemove {
+		entOff := int(db.arena.ReadUint32(streamFirstEntry(dataOff)))
+		if entOff == 0 {
+			break
+		}
+
+		nextOff := int(db.arena.ReadUint32(streamEntryNext(entOff)))
+
+		if nextOff != 0 {
+			db.arena.WriteUint32(streamEntryPrev(nextOff), 0)
+			db.arena.WriteUint32(streamFirstEntry(dataOff), uint32(nextOff))
+		} else {
+			db.arena.WriteUint32(streamFirstEntry(dataOff), 0)
+			db.arena.WriteUint32(streamLastEntry(dataOff), 0)
+		}
+
+		db.arena.Free(entOff)
+		removed++
+	}
+
+	count := int(db.arena.ReadUint32(streamEntryCount(dataOff)))
+	db.arena.WriteUint32(streamEntryCount(dataOff), uint32(count-removed))
+
+	if count-removed == 0 {
+		db.dict.Del(keyBytes)
+		db.FreeObject(headOff)
+	}
+
+	return removed
+}
+
 func (db *RedisDB) XReadGroup(group, consumer string, streams map[string]string, count int) map[string][]StreamEntry {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -385,6 +493,329 @@ type StreamError struct {
 
 func (e *StreamError) Error() string {
 	return e.Message
+}
+
+func (db *RedisDB) XInfo(key string) map[string]interface{} {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+	if !ok {
+		return nil
+	}
+
+	dataOff := db.ObjectDataOffset(headOff)
+
+	firstEntOff := int(db.arena.ReadUint32(streamFirstEntry(dataOff)))
+	lastEntOff := int(db.arena.ReadUint32(streamLastEntry(dataOff)))
+
+	var firstID, lastID string
+	var firstMs, firstSeq, lastMs, lastSeq uint64
+
+	if firstEntOff != 0 {
+		firstMs = db.arena.ReadUint64(streamEntryMs(firstEntOff))
+		firstSeq = db.arena.ReadUint64(streamEntrySeq(firstEntOff))
+		firstID = formatStreamID(firstMs, firstSeq)
+	}
+
+	if lastEntOff != 0 {
+		lastMs = db.arena.ReadUint64(streamEntryMs(lastEntOff))
+		lastSeq = db.arena.ReadUint64(streamEntrySeq(lastEntOff))
+		lastID = formatStreamID(lastMs, lastSeq)
+	}
+
+	entryCount := int(db.arena.ReadUint32(streamEntryCount(dataOff)))
+	groupsOff := int(db.arena.ReadUint32(streamGroupsDict(dataOff)))
+
+	groupCount := 0
+	if groupsOff != 0 {
+		groupsDict := LoadDictMeta(db.arena, groupsOff)
+		groupCount = groupsDict.used
+	}
+
+	return map[string]interface{}{
+		"length":         entryCount,
+		"first-entry":    firstID,
+		"last-entry":     lastID,
+		"groups":         groupCount,
+		"stream-live-sec": 0,
+	}
+}
+
+func (db *RedisDB) XInfoGroups(key string) []map[string]interface{} {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+	if !ok {
+		return nil
+	}
+
+	dataOff := db.ObjectDataOffset(headOff)
+	groupsOff := int(db.arena.ReadUint32(streamGroupsDict(dataOff)))
+	if groupsOff == 0 {
+		return nil
+	}
+
+	groupsDict := LoadDictMeta(db.arena, groupsOff)
+	result := make([]map[string]interface{}, 0, groupsDict.used)
+
+	for i := 0; i < groupsDict.size; i++ {
+		keyArenaOff, valOff := groupsDict.getSlot(i)
+		if keyArenaOff == 0 {
+			continue
+		}
+
+		keySize := db.arena.SizeAt(keyArenaOff)
+		groupNameBytes := db.arena.ReadBytes(keyArenaOff, keySize)
+		groupName := string(groupNameBytes)
+		groupDataOff := valOff
+
+		startMs := db.arena.ReadUint64(groupDataOff)
+		startSeq := db.arena.ReadUint64(groupDataOff + 8)
+		consumersDictOff := int(db.arena.ReadUint32(groupDataOff + 16))
+
+		consumerCount := 0
+		if consumersDictOff != 0 {
+			consumersDict := LoadDictMeta(db.arena, consumersDictOff)
+			consumerCount = consumersDict.used
+		}
+
+		result = append(result, map[string]interface{}{
+			"name":            groupName,
+			"last-delivered":  formatStreamID(startMs, startSeq),
+			"consumers":       consumerCount,
+			"pending":         0,
+		})
+	}
+
+	return result
+}
+
+func (db *RedisDB) XClaim(key, group, consumer string, minIdleMs int64, ids []string) []StreamEntry {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+	if !ok {
+		return nil
+	}
+
+	dataOff := db.ObjectDataOffset(headOff)
+	groupsOff := int(db.arena.ReadUint32(streamGroupsDict(dataOff)))
+	if groupsOff == 0 {
+		return nil
+	}
+
+	groupsDict := LoadDictMeta(db.arena, groupsOff)
+	groupDataOff, ok := groupsDict.Get([]byte(group))
+	if !ok {
+		return nil
+	}
+
+	consumersDictOff := int(db.arena.ReadUint32(groupDataOff + 16))
+
+	var consumersDict *Dict
+	if consumersDictOff == 0 {
+		consumersDict = NewDict(db.arena)
+		metaOff := db.arena.Alloc(12)
+		consumersDict.StoreMeta(metaOff)
+		consumersDictOff = metaOff
+		db.arena.WriteUint32(groupDataOff+16, uint32(consumersDictOff))
+	} else {
+		consumersDict = LoadDictMeta(db.arena, consumersDictOff)
+	}
+
+	consumerDataOffVal, exists := consumersDict.Get([]byte(consumer))
+	if !exists {
+		consumerDataOffVal = db.arena.Alloc(16)
+		db.arena.WriteUint64(consumerDataOffVal, 0)
+		db.arena.WriteUint64(consumerDataOffVal+8, 0)
+		consumersDict.Set([]byte(consumer), consumerDataOffVal)
+		consumersDict.StoreMeta(consumersDictOff)
+	}
+
+	result := make([]StreamEntry, 0, len(ids))
+
+	for _, id := range ids {
+		ms, seq := parseStreamID(id)
+		entOff := int(db.arena.ReadUint32(streamFirstEntry(dataOff)))
+
+		for entOff != 0 {
+			eMs := db.arena.ReadUint64(streamEntryMs(entOff))
+			eSeq := db.arena.ReadUint64(streamEntrySeq(entOff))
+
+			if eMs == ms && eSeq == seq {
+				entry := db.streamReadEntry(entOff)
+				result = append(result, entry)
+				break
+			}
+			entOff = int(db.arena.ReadUint32(streamEntryNext(entOff)))
+		}
+	}
+
+	groupsDict.StoreMeta(groupsOff)
+	return result
+}
+
+func (db *RedisDB) XAutoClaim(key, group, consumer string, start string, count int) (string, []StreamEntry) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+	if !ok {
+		return "", nil
+	}
+
+	dataOff := db.ObjectDataOffset(headOff)
+	groupsOff := int(db.arena.ReadUint32(streamGroupsDict(dataOff)))
+	if groupsOff == 0 {
+		return "", nil
+	}
+
+	groupsDict := LoadDictMeta(db.arena, groupsOff)
+	_, ok = groupsDict.Get([]byte(group))
+	if !ok {
+		return "", nil
+	}
+
+	startMs, startSeq := parseStreamID(start)
+
+	entOff := int(db.arena.ReadUint32(streamFirstEntry(dataOff)))
+	result := make([]StreamEntry, 0, count)
+	nextStartID := ""
+
+	for entOff != 0 && len(result) < count {
+		eMs := db.arena.ReadUint64(streamEntryMs(entOff))
+		eSeq := db.arena.ReadUint64(streamEntrySeq(entOff))
+
+		if eMs > startMs || (eMs == startMs && eSeq > startSeq) {
+			entry := db.streamReadEntry(entOff)
+			result = append(result, entry)
+			nextStartID = formatStreamID(eMs, eSeq)
+		}
+		entOff = int(db.arena.ReadUint32(streamEntryNext(entOff)))
+	}
+
+	groupsDict.StoreMeta(groupsOff)
+	return nextStartID, result
+}
+
+func (db *RedisDB) XPending(key, group string) []map[string]interface{} {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+	if !ok {
+		return nil
+	}
+
+	dataOff := db.ObjectDataOffset(headOff)
+	groupsOff := int(db.arena.ReadUint32(streamGroupsDict(dataOff)))
+	if groupsOff == 0 {
+		return nil
+	}
+
+	groupsDict := LoadDictMeta(db.arena, groupsOff)
+	_, ok = groupsDict.Get([]byte(group))
+	if !ok {
+		return nil
+	}
+
+	return []map[string]interface{}{}
+}
+
+func (db *RedisDB) XGroupCreateConsumer(key, group, consumer string) bool {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+	if !ok {
+		return false
+	}
+
+	dataOff := db.ObjectDataOffset(headOff)
+	groupsOff := int(db.arena.ReadUint32(streamGroupsDict(dataOff)))
+	if groupsOff == 0 {
+		return false
+	}
+
+	groupsDict := LoadDictMeta(db.arena, groupsOff)
+	groupDataOff, ok := groupsDict.Get([]byte(group))
+	if !ok {
+		return false
+	}
+
+	consumersDictOff := int(db.arena.ReadUint32(groupDataOff + 16))
+
+	var consumersDict *Dict
+	if consumersDictOff == 0 {
+		consumersDict = NewDict(db.arena)
+		metaOff := db.arena.Alloc(12)
+		consumersDict.StoreMeta(metaOff)
+		consumersDictOff = metaOff
+		db.arena.WriteUint32(groupDataOff+16, uint32(consumersDictOff))
+	} else {
+		consumersDict = LoadDictMeta(db.arena, consumersDictOff)
+	}
+
+	_, exists := consumersDict.Get([]byte(consumer))
+	if exists {
+		return true
+	}
+
+	consumerDataOff := db.arena.Alloc(16)
+	db.arena.WriteUint64(consumerDataOff, 0)
+	db.arena.WriteUint64(consumerDataOff+8, 0)
+	consumersDict.Set([]byte(consumer), consumerDataOff)
+	consumersDict.StoreMeta(consumersDictOff)
+	groupsDict.StoreMeta(groupsOff)
+
+	return true
+}
+
+func (db *RedisDB) XGroupDelConsumer(key, group, consumer string) int {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+	if !ok {
+		return 0
+	}
+
+	dataOff := db.ObjectDataOffset(headOff)
+	groupsOff := int(db.arena.ReadUint32(streamGroupsDict(dataOff)))
+	if groupsOff == 0 {
+		return 0
+	}
+
+	groupsDict := LoadDictMeta(db.arena, groupsOff)
+	groupDataOff, ok := groupsDict.Get([]byte(group))
+	if !ok {
+		return 0
+	}
+
+	consumersDictOff := int(db.arena.ReadUint32(groupDataOff + 16))
+	if consumersDictOff == 0 {
+		return 0
+	}
+
+	consumersDict := LoadDictMeta(db.arena, consumersDictOff)
+	consumerKey := []byte(consumer)
+	if consumersDict.Del(consumerKey) {
+		consumersDict.StoreMeta(consumersDictOff)
+		groupsDict.StoreMeta(groupsOff)
+		return 1
+	}
+
+	return 0
 }
 
 var _ = binary.LittleEndian

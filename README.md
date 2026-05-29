@@ -556,3 +556,83 @@ go build -gcflags="-m" .
 ## License
 
 MIT
+
+## 路线图
+
+### ✅ 已实现模块
+
+String, List, Hash, Set, Sorted Set, Bitmap, HyperLogLog, Geo, Stream, TimeSeries (Labels), Probabilistic (BF/CF/CMS/TopK), JSON, Search, Graph, Rate Limiting (Cell/Throttle)
+
+### ✅ 高优先级命令（已完成）
+
+| 类别 | 命令 | 说明 |
+|------|------|------|
+| String | `MGET` / `MSET` | 批量获取/设置多个 key |
+| String | `DECR` / `DECRBY` | 递减操作 |
+| String | `SETNX` | key 不存在时设置（分布式锁常用） |
+| Hash | `HMSET` / `HMGET` | 批量设置/获取 hash 字段 |
+| Hash | `HKEYS` / `HVALS` | 获取所有字段名/值 |
+| Hash | `HSETNX` | field 不存在时设置 |
+| List | `LTRIM` | 裁剪列表保留指定范围 |
+| List | `LLEN` | 获取列表长度 |
+| Set | `SDIFF` / `SDIFFSTORE` | 集合差集运算 |
+| Sorted Set | `ZPOPMIN` / `ZPOPMAX` | 弹出最小/最大分数成员 |
+| Sorted Set | `ZRANK` / `ZREVRANK` | 获取成员排名 |
+| Sorted Set | `ZINCRBY` | 递增分数 |
+
+### ✅ 中优先级命令（已完成）
+
+| 类别 | 命令 | 说明 |
+|------|------|------|
+| String | `SETEX` / `PSETEX` | 设置值并指定过期时间 |
+| String | `GETDEL` | 删除并返回值 |
+| String | `BITPOS` | 查找第一个 0/1 bit 位置 |
+| Hash | `HINCRBYFLOAT` | hash 字段浮点递增 |
+| Hash | `HSTRLEN` | 获取字段值长度 |
+| Hash | `HRANDFIELD` | 随机获取 hash 字段 |
+| List | `LMOVE` / `BLMOVE` | 原子移动列表元素 |
+| List | `RPOPLPUSH` | 弹出并推送到另一列表 |
+| List | `LINSERT` | 在指定位置插入 |
+| Set | `SMOVE` | 移动成员到另一集合 |
+| Sorted Set | `ZCOUNT` | 统计分数范围内成员数 |
+| Sorted Set | `ZLEXCOUNT` | 字典序范围计数 |
+| Sorted Set | `ZRANGEBYLEX` | 字典序范围查询 |
+| Sorted Set | `BZMPOP` | 阻塞弹出版本 |
+
+### ✅ Stream 扩展（已完成）
+
+| 命令 | 说明 |
+|------|------|
+| `XDEL` | 删除流中指定 ID 的条目 |
+| `XTRIM` | 裁剪流保留指定数量的条目 |
+| `XINFO` | 获取流、组、消费者的详细信息 |
+| `XCLAIM` | 认领其他消费者的 pending 消息 |
+| `XAUTOCLAIM` | 自动认领旧消息 |
+| `XPENDING` | 查看 pending 消息状态 |
+| `XGROUP CREATECONSUMER` | 创建消费者 |
+| `XGROUP DELCONSUMER` | 删除消费者 |
+
+### 📋 待实现功能
+
+#### TimeSeries 扩展
+
+| 命令 | 说明 |
+|------|------|
+| `TS.CREATEDS` | 创建下采样/压缩规则 |
+| `TS.GET` | 获取最新数据点 |
+| `TS.MGET` | 批量获取多个时间序列 |
+| `TS.RANGE` / `TS.REVRANGE` | 范围查询 |
+| `TS.MRANGE` / `TS.MREVRANGE` | 批量范围查询带标签过滤 |
+| `TS.QUERYINDEX` | 按标签查询时间序列 |
+| `TS.AGGREGATIONS` | 内置聚合函数 (avg, sum, min, max 等) |
+| `TS.DELETERULE` | 删除压缩规则 |
+
+#### 低优先级（不常用/复杂）
+
+- **Pub/Sub**: PUBLISH, SUBSCRIBE, PSUBSCRIBE 等
+- **Transactions**: MULTI, EXEC, DISCARD, WATCH
+- **Scripting**: EVAL, EVALSHA, FUNCTION 等
+- **Server/Config**: SAVE, BGSAVE, INFO, CONFIG 等
+- **ACL**: 用户权限管理
+- **Cluster**: 集群相关命令
+- **Module APIs**: BloomFilter 增强, TDigest, AI 等

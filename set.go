@@ -354,6 +354,234 @@ func (db *RedisDB) SUnion(keys ...string) *ZSlices {
 	return result
 }
 
+// SDiff 获取多个集合的差集。返回 *ZSlices，遍历后须 zs.Close()。
+// 差集 = 第一个集合的元素，去除后续集合中存在的元素。
+func (db *RedisDB) SDiff(keys ...string) *ZSlices {
+	if len(keys) == 0 {
+		return nil
+	}
+
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	result := db.smembersLocked(keys[0])
+	if result == nil {
+		return nil
+	}
+
+	if len(keys) == 1 {
+		return result
+	}
+
+	for _, key := range keys[1:] {
+		other := db.smembersLocked(key)
+		if other == nil {
+			result.Close()
+			return nil
+		}
+
+		set := make(map[string]bool, other.Len())
+		for i := 0; i < other.Len(); i++ {
+			set[string(other.Get(i))] = true
+		}
+		other.Close()
+
+		filtered := NewZSlices()
+		for i := 0; i < result.Len(); i++ {
+			s := string(result.Get(i))
+			if !set[s] {
+				filtered.Add(result.Get(i))
+			}
+		}
+		result.Close()
+		filtered.Finish()
+		result = filtered
+	}
+
+	return result
+}
+
+// SDiffStore 获取多个集合的差集并将结果存入 destKey。返回元素数量。
+// 如果 destKey 已存在，会覆盖。
+func (db *RedisDB) SDiffStore(destKey string, keys ...string) int {
+	if len(keys) == 0 {
+		db.mu.Lock()
+		defer db.mu.Unlock()
+		headOff, ok := db.dict.Get([]byte(destKey))
+		if ok {
+			db.dict.Del([]byte(destKey))
+			db.FreeObject(headOff)
+		}
+		return 0
+	}
+
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	result := db.smembersLocked(keys[0])
+	if result == nil {
+		headOff, ok := db.dict.Get([]byte(destKey))
+		if ok {
+			db.dict.Del([]byte(destKey))
+			db.FreeObject(headOff)
+		}
+		return 0
+	}
+
+	if len(keys) == 1 {
+		headOff, ok := db.dict.Get([]byte(destKey))
+		if ok {
+			db.dict.Del([]byte(destKey))
+			db.FreeObject(headOff)
+		}
+
+		innerDict := NewDict(db.arena)
+		for i := 0; i < result.Len(); i++ {
+			mb := result.Get(i)
+			innerDict.Set(mb, 0)
+		}
+		result.Close()
+
+		sdOff := db.arena.Alloc(12)
+		innerDict.StoreMeta(sdOff)
+		headOff = db.NewObject(ObjSet, ObjEncodingHashtable, sdOff)
+		db.dict.Set([]byte(destKey), headOff)
+		return innerDict.used
+	}
+
+	for _, key := range keys[1:] {
+		other := db.smembersLocked(key)
+		if other == nil {
+			result.Close()
+			headOff, ok := db.dict.Get([]byte(destKey))
+			if ok {
+				db.dict.Del([]byte(destKey))
+				db.FreeObject(headOff)
+			}
+			return 0
+		}
+
+		set := make(map[string]bool, other.Len())
+		for i := 0; i < other.Len(); i++ {
+			set[string(other.Get(i))] = true
+		}
+		other.Close()
+
+		filtered := NewZSlices()
+		for i := 0; i < result.Len(); i++ {
+			s := string(result.Get(i))
+			if !set[s] {
+				filtered.Add(result.Get(i))
+			}
+		}
+		result.Close()
+		filtered.Finish()
+		result = filtered
+	}
+
+	headOff, ok := db.dict.Get([]byte(destKey))
+	if ok {
+		db.dict.Del([]byte(destKey))
+		db.FreeObject(headOff)
+	}
+
+	innerDict := NewDict(db.arena)
+	for i := 0; i < result.Len(); i++ {
+		mb := result.Get(i)
+		innerDict.Set(mb, 0)
+	}
+	result.Close()
+
+	sdOff := db.arena.Alloc(12)
+	innerDict.StoreMeta(sdOff)
+	headOff = db.NewObject(ObjSet, ObjEncodingHashtable, sdOff)
+	db.dict.Set([]byte(destKey), headOff)
+	return innerDict.used
+}
+
+func (db *RedisDB) SMove(srcKey, dstKey string, member []byte) bool {
+	pb := BufFromBytes(member)
+	result := db.SMoveBuffer(srcKey, dstKey, pb)
+	pb.Close()
+	return result
+}
+
+func (db *RedisDB) SMoveBuffer(srcKey, dstKey string, member *PooledBuffer) bool {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	srcKeyBytes := []byte(srcKey)
+	srcHeadOff, srcOk := db.dict.Get(srcKeyBytes)
+	if !srcOk {
+		return false
+	}
+
+	mb := member.Bytes()
+
+	srcEnc := db.ObjectEncoding(srcHeadOff)
+	srcDataOff := db.ObjectDataOffset(srcHeadOff)
+
+	var found bool
+	if srcEnc == ObjEncodingIntset {
+		val := int64(binary.LittleEndian.Uint64(mb))
+		found = intsetRemove(db.arena, &srcDataOff, val)
+		if found {
+			db.ObjectSetDataOffset(srcHeadOff, srcDataOff)
+			if intsetLen(db.arena, srcDataOff) == 0 {
+				db.dict.Del(srcKeyBytes)
+				db.FreeObject(srcHeadOff)
+			}
+		}
+	} else if srcEnc == ObjEncodingHashtable {
+		found = false
+		innerDict := LoadDictMeta(db.arena, srcDataOff)
+		if innerDict.Del(mb) {
+			found = true
+			innerDict.StoreMeta(srcDataOff)
+			if innerDict.used == 0 {
+				db.dict.Del(srcKeyBytes)
+				db.FreeObject(srcHeadOff)
+			}
+		}
+	}
+
+	if !found {
+		return false
+	}
+
+	dstKeyBytes := []byte(dstKey)
+	dstHeadOff, dstOk := db.dict.Get(dstKeyBytes)
+
+	if dstOk {
+		dstEnc := db.ObjectEncoding(dstHeadOff)
+		dstDataOff := db.ObjectDataOffset(dstHeadOff)
+
+		if dstEnc == ObjEncodingIntset {
+			val := int64(binary.LittleEndian.Uint64(mb))
+			if intsetFind(db.arena, dstDataOff, val) {
+				return true
+			}
+			intsetAdd(db.arena, &dstDataOff, val)
+			db.ObjectSetDataOffset(dstHeadOff, dstDataOff)
+		} else if dstEnc == ObjEncodingHashtable {
+			innerDict := LoadDictMeta(db.arena, dstDataOff)
+			if _, exists := innerDict.Get(mb); !exists {
+				innerDict.Set(mb, 0)
+				innerDict.StoreMeta(dstDataOff)
+			}
+		}
+	} else {
+		innerDict := NewDict(db.arena)
+		innerDict.Set(mb, 0)
+		sdOff := db.arena.Alloc(12)
+		innerDict.StoreMeta(sdOff)
+		dstHeadOff = db.NewObject(ObjSet, ObjEncodingHashtable, sdOff)
+		db.dict.Set(dstKeyBytes, dstHeadOff)
+	}
+
+	return true
+}
+
 func allInts(members []*PooledBuffer) bool {
 	for _, m := range members {
 		if m.Len() != 8 {

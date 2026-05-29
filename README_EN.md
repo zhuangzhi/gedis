@@ -439,3 +439,83 @@ go build -gcflags="-m" .
 ## License
 
 MIT
+
+## Roadmap
+
+### ✅ Implemented Modules
+
+String, List, Hash, Set, Sorted Set, Bitmap, HyperLogLog, Geo, Stream, TimeSeries (Labels), Probabilistic (BF/CF/CMS/TopK), JSON, Search, Graph, Rate Limiting (Cell/Throttle)
+
+### ✅ High Priority Commands (Completed)
+
+| Category | Command | Description |
+|----------|---------|-------------|
+| String | `MGET` / `MSET` | Batch get/set multiple keys |
+| String | `DECR` / `DECRBY` | Decrement operation |
+| String | `SETNX` | Set if not exists (used for distributed locks) |
+| Hash | `HMSET` / `HMGET` | Batch set/get hash fields |
+| Hash | `HKEYS` / `HVALS` | Get all field names/values |
+| Hash | `HSETNX` | Set field if not exists |
+| List | `LTRIM` | Trim list to specified range |
+| List | `LLEN` | Get list length |
+| Set | `SDIFF` / `SDIFFSTORE` | Set difference operation |
+| Sorted Set | `ZPOPMIN` / `ZPOPMAX` | Pop min/max score member |
+| Sorted Set | `ZRANK` / `ZREVRANK` | Get member rank |
+| Sorted Set | `ZINCRBY` | Increment score |
+
+### ✅ Medium Priority Commands (Completed)
+
+| Category | Command | Description |
+|----------|---------|-------------|
+| String | `SETEX` / `PSETEX` | Set with expiration |
+| String | `GETDEL` | Delete and return value |
+| String | `BITPOS` | Find first 0/1 bit position |
+| Hash | `HINCRBYFLOAT` | Increment hash field float |
+| Hash | `HSTRLEN` | Get field value length |
+| Hash | `HRANDFIELD` | Random hash field |
+| List | `LMOVE` / `BLMOVE` | Atomic move list elements |
+| List | `RPOPLPUSH` | Pop and push to another list |
+| List | `LINSERT` | Insert at position |
+| Set | `SMOVE` | Move member to another set |
+| Sorted Set | `ZCOUNT` | Count members in score range |
+| Sorted Set | `ZLEXCOUNT` | Lexicographic range count |
+| Sorted Set | `ZRANGEBYLEX` | Lexicographic range query |
+| Sorted Set | `BZMPOP` | Blocking pop version |
+
+### ✅ Stream Extensions (Completed)
+
+| Command | Description |
+|---------|-------------|
+| `XDEL` | Delete entries by ID |
+| `XTRIM` | Trim stream to count |
+| `XINFO` | Stream/group/consumer info |
+| `XCLAIM` | Claim pending messages |
+| `XAUTOCLAIM` | Auto claim old messages |
+| `XPENDING` | Pending messages status |
+| `XGROUP CREATECONSUMER` | Create consumer |
+| `XGROUP DELCONSUMER` | Delete consumer |
+
+### 📋 Pending Implementation
+
+#### TimeSeries Extensions
+
+| Command | Description |
+|---------|-------------|
+| `TS.CREATEDS` | Create downsampling rules |
+| `TS.GET` | Get latest data point |
+| `TS.MGET` | Batch get multiple series |
+| `TS.RANGE` / `TS.REVRANGE` | Range query |
+| `TS.MRANGE` / `TS.MREVRANGE` | Batch range with tag filter |
+| `TS.QUERYINDEX` | Query by tags |
+| `TS.AGGREGATIONS` | Built-in aggregation (avg, sum, min, max) |
+| `TS.DELETERULE` | Delete compaction rule |
+
+#### Low Priority (Uncommon/Complex)
+
+- **Pub/Sub**: PUBLISH, SUBSCRIBE, PSUBSCRIBE
+- **Transactions**: MULTI, EXEC, DISCARD, WATCH
+- **Scripting**: EVAL, EVALSHA, FUNCTION
+- **Server/Config**: SAVE, BGSAVE, INFO, CONFIG
+- **ACL**: User permission management
+- **Cluster**: Cluster-related commands
+- **Module APIs**: BloomFilter enhancements, TDigest, AI

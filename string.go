@@ -358,3 +358,175 @@ func (db *RedisDB) IncrByFloat(key string, inc float64) (float64, error) {
 
 	return newVal, nil
 }
+
+func (db *RedisDB) MGet(keys ...string) []*PooledBuffer {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	results := make([]*PooledBuffer, len(keys))
+	for i, key := range keys {
+		keyBytes := []byte(key)
+		headOff, ok := db.dict.Get(keyBytes)
+		if !ok {
+			results[i] = nil
+			continue
+		}
+
+		enc := db.ObjectEncoding(headOff)
+		if enc == ObjEncodingInt {
+			intVal := int64(db.arena.ReadUint64(objHeaderDataOffset(headOff)))
+			buf := Buf(strconv.FormatInt(intVal, 10))
+			results[i] = buf
+		} else {
+			dataOff := db.ObjectDataOffset(headOff)
+			if dataOff == 0 {
+				results[i] = nil
+				continue
+			}
+			size := db.arena.SizeAt(dataOff)
+			data := db.arena.ReadBytes(dataOff, size)
+			buf := Buf(string(data))
+			results[i] = buf
+		}
+	}
+	return results
+}
+
+func (db *RedisDB) MSet(keyValues map[string]*PooledBuffer) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	for key, value := range keyValues {
+		keyBytes := []byte(key)
+		headOff, ok := db.dict.Get(keyBytes)
+
+		if !ok {
+			valOff := db.arena.AllocBytes(value.Bytes())
+			headOff = db.NewObject(ObjString, ObjEncodingRaw, valOff)
+			db.dict.Set(keyBytes, headOff)
+		} else {
+			enc := db.ObjectEncoding(headOff)
+			if enc == ObjEncodingInt {
+				db.ObjectSetEncoding(headOff, ObjEncodingRaw)
+			}
+			dataOff := db.ObjectDataOffset(headOff)
+			if dataOff != 0 {
+				db.arena.Free(dataOff)
+			}
+			newOff := db.arena.AllocBytes(value.Bytes())
+			db.ObjectSetDataOffset(headOff, newOff)
+		}
+	}
+}
+
+func (db *RedisDB) MSetNX(keyValues map[string]*PooledBuffer) int {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	inserted := 0
+	for key, value := range keyValues {
+		keyBytes := []byte(key)
+		_, ok := db.dict.Get(keyBytes)
+		if ok {
+			continue
+		}
+
+		valOff := db.arena.AllocBytes(value.Bytes())
+		headOff := db.NewObject(ObjString, ObjEncodingRaw, valOff)
+		db.dict.Set(keyBytes, headOff)
+		inserted++
+	}
+	return inserted
+}
+
+func (db *RedisDB) SetNX(key string, value *PooledBuffer) bool {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	keyBytes := []byte(key)
+	_, ok := db.dict.Get(keyBytes)
+	if ok {
+		return false
+	}
+
+	valOff := db.arena.AllocBytes(value.Bytes())
+	headOff := db.NewObject(ObjString, ObjEncodingRaw, valOff)
+	db.dict.Set(keyBytes, headOff)
+	return true
+}
+
+func (db *RedisDB) Decr(key string) (int64, error) {
+	return db.IncrBy(key, -1)
+}
+
+func (db *RedisDB) DecrBy(key string, dec int64) (int64, error) {
+	return db.IncrBy(key, -dec)
+}
+
+func (db *RedisDB) SetEx(key string, seconds int, value []byte) {
+	pb := BufFromBytes(value)
+	db.SetExBuffer(key, seconds, pb)
+	pb.Close()
+}
+
+func (db *RedisDB) SetExBuffer(key string, seconds int, value *PooledBuffer) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	keyBytes := []byte(key)
+	valOff := db.arena.AllocBytes(value.Bytes())
+	headOff := db.NewObject(ObjString, ObjEncodingRaw, valOff)
+	db.dict.Set(keyBytes, headOff)
+}
+
+func (db *RedisDB) PsetEx(key string, milliseconds int64, value []byte) {
+	pb := BufFromBytes(value)
+	db.PsetExBuffer(key, milliseconds, pb)
+	pb.Close()
+}
+
+func (db *RedisDB) PsetExBuffer(key string, milliseconds int64, value *PooledBuffer) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	keyBytes := []byte(key)
+	valOff := db.arena.AllocBytes(value.Bytes())
+	headOff := db.NewObject(ObjString, ObjEncodingRaw, valOff)
+	db.dict.Set(keyBytes, headOff)
+}
+
+func (db *RedisDB) GetDel(key string) (*PooledBuffer, bool) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	headOff, ok := db.dict.Get([]byte(key))
+	if !ok {
+		return nil, false
+	}
+
+	typ := db.ObjectType(headOff)
+	if typ != ObjString && typ != ObjBitmap {
+		return nil, false
+	}
+
+	enc := db.ObjectEncoding(headOff)
+	dataOff := db.ObjectDataOffset(headOff)
+
+	var pb *PooledBuffer
+	if enc == ObjEncodingInt {
+		val := int64(db.arena.ReadUint64(objHeaderDataOffset(headOff)))
+		s := strconv.FormatInt(val, 10)
+		pb = NewBuf(len(s))
+		pb.buf.WriteString(s)
+	} else if dataOff != 0 {
+		size := db.arena.SizeAt(dataOff)
+		pb = NewBuf(size)
+		pb.buf.Write(db.arena.ReadBytes(dataOff, size))
+	} else {
+		return nil, false
+	}
+
+	db.dict.Del([]byte(key))
+	db.FreeObject(headOff)
+	return pb, true
+}

@@ -234,6 +234,72 @@ func (db *RedisDB) HIncrBy(key string, field string, inc int64) (int64, error) {
 	return 0, nil
 }
 
+func (db *RedisDB) HStrLen(key string, field string) int {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+	if !ok {
+		return 0
+	}
+
+	enc := db.ObjectEncoding(headOff)
+	dataOff := db.ObjectDataOffset(headOff)
+
+	if enc == ObjEncodingZiplist {
+		zlOff := dataOff
+		n := ziplistLen(db.arena, zlOff)
+		pos := zlOff + ziplistHeaderSize
+		for i := 0; i < n; i += 2 {
+			if ziplistEntryDataEquals(db.arena, pos, []byte(field)) {
+				v := ziplistGet(db.arena, zlOff, i+1)
+				return len(v)
+			}
+			pos += ziplistEntryTotalSize(db.arena, pos)
+			pos += ziplistEntryTotalSize(db.arena, pos)
+		}
+	}
+	return 0
+}
+
+func (db *RedisDB) HRandField(key string, count int) []*PooledBuffer {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+	if !ok {
+		return nil
+	}
+
+	enc := db.ObjectEncoding(headOff)
+	dataOff := db.ObjectDataOffset(headOff)
+
+	if enc == ObjEncodingZiplist {
+		zlOff := dataOff
+		n := ziplistLen(db.arena, zlOff)
+		if n == 0 {
+			return nil
+		}
+
+		result := make([]*PooledBuffer, 0, count)
+		for i := 0; i < count && i < n/2; i++ {
+			idx := (i * 7) % (n / 2)
+			pos := zlOff + ziplistHeaderSize
+			for j := 0; j < idx*2; j++ {
+				pos += ziplistEntryTotalSize(db.arena, pos)
+			}
+			v := ziplistGet(db.arena, zlOff, idx*2)
+			pb := NewBuf(len(v))
+			pb.buf.Write(v)
+			result = append(result, pb)
+		}
+		return result
+	}
+	return nil
+}
+
 func (db *RedisDB) HExists(key string, field string) bool {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -338,4 +404,234 @@ func ziplistInsertAt(arena *Arena, zlOff int, index int, data []byte) int {
 
 	arena.Free(zlOff)
 	return newOff
+}
+
+func (db *RedisDB) HMSet(key string, keyValues map[string]*PooledBuffer) int {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+
+	var zlOff int
+	if !ok {
+		zlOff = ziplistNew(db.arena)
+		for field, value := range keyValues {
+			zlOff = ziplistInsert(db.arena, zlOff, []byte(field), false)
+			zlOff = ziplistInsert(db.arena, zlOff, value.Bytes(), false)
+		}
+		headOff = db.NewObject(ObjHash, ObjEncodingZiplist, zlOff)
+		db.dict.Set(keyBytes, headOff)
+		return len(keyValues)
+	}
+
+	enc := db.ObjectEncoding(headOff)
+	dataOff := db.ObjectDataOffset(headOff)
+
+	if enc == ObjEncodingZiplist {
+		zlOff = dataOff
+		for field, value := range keyValues {
+			idx := ziplistFind(db.arena, zlOff, []byte(field))
+			if idx != -1 {
+				zlOff = ziplistDelete(db.arena, zlOff, idx)
+				zlOff = ziplistDelete(db.arena, zlOff, idx)
+			}
+			zlOff = ziplistInsert(db.arena, zlOff, []byte(field), false)
+			zlOff = ziplistInsert(db.arena, zlOff, value.Bytes(), false)
+		}
+		db.ObjectSetDataOffset(headOff, zlOff)
+	}
+	return len(keyValues)
+}
+
+func (db *RedisDB) HMGet(key string, fields ...string) []*PooledBuffer {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+	if !ok {
+		results := make([]*PooledBuffer, len(fields))
+		for i := range results {
+			results[i] = nil
+		}
+		return results
+	}
+
+	enc := db.ObjectEncoding(headOff)
+	dataOff := db.ObjectDataOffset(headOff)
+
+	results := make([]*PooledBuffer, len(fields))
+	if enc == ObjEncodingZiplist {
+		zlOff := dataOff
+		n := ziplistLen(db.arena, zlOff)
+		pos := zlOff + ziplistHeaderSize
+
+		for i, field := range fields {
+			found := false
+			scanPos := pos
+			for j := 0; j < n; j += 2 {
+				if ziplistEntryDataEquals(db.arena, scanPos, []byte(field)) {
+					valBytes := ziplistGet(db.arena, zlOff, j+1)
+					if valBytes != nil {
+						results[i] = Buf(string(valBytes))
+					}
+					found = true
+					break
+				}
+				scanPos += ziplistEntryTotalSize(db.arena, scanPos)
+				scanPos += ziplistEntryTotalSize(db.arena, scanPos)
+			}
+			if !found {
+				results[i] = nil
+			}
+		}
+	}
+	return results
+}
+
+func (db *RedisDB) HKeys(key string) [][]byte {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+	if !ok {
+		return nil
+	}
+
+	enc := db.ObjectEncoding(headOff)
+	dataOff := db.ObjectDataOffset(headOff)
+
+	if enc == ObjEncodingZiplist {
+		zlOff := dataOff
+		n := ziplistLen(db.arena, zlOff)
+		keys := make([][]byte, 0, n/2)
+		for i := 0; i < n; i += 2 {
+			keyBytes := ziplistGet(db.arena, zlOff, i)
+			if keyBytes != nil {
+				keys = append(keys, keyBytes)
+			}
+		}
+		return keys
+	}
+	return nil
+}
+
+func (db *RedisDB) HVals(key string) []*PooledBuffer {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+	if !ok {
+		return nil
+	}
+
+	enc := db.ObjectEncoding(headOff)
+	dataOff := db.ObjectDataOffset(headOff)
+
+	if enc == ObjEncodingZiplist {
+		zlOff := dataOff
+		n := ziplistLen(db.arena, zlOff)
+		vals := make([]*PooledBuffer, 0, n/2)
+		for i := 1; i < n; i += 2 {
+			valBytes := ziplistGet(db.arena, zlOff, i)
+			if valBytes != nil {
+				vals = append(vals, Buf(string(valBytes)))
+			}
+		}
+		return vals
+	}
+	return nil
+}
+
+func (db *RedisDB) HSetNX(key string, field string, value *PooledBuffer) bool {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+
+	if !ok {
+		zlOff := ziplistNew(db.arena)
+		zlOff = ziplistInsert(db.arena, zlOff, []byte(field), false)
+		zlOff = ziplistInsert(db.arena, zlOff, value.Bytes(), false)
+		headOff = db.NewObject(ObjHash, ObjEncodingZiplist, zlOff)
+		db.dict.Set(keyBytes, headOff)
+		return true
+	}
+
+	enc := db.ObjectEncoding(headOff)
+	dataOff := db.ObjectDataOffset(headOff)
+
+	if enc == ObjEncodingZiplist {
+		zlOff := dataOff
+		n := ziplistLen(db.arena, zlOff)
+		pos := zlOff + ziplistHeaderSize
+		for i := 0; i < n; i += 2 {
+			if ziplistEntryDataEquals(db.arena, pos, []byte(field)) {
+				return false
+			}
+			pos += ziplistEntryTotalSize(db.arena, pos)
+			pos += ziplistEntryTotalSize(db.arena, pos)
+		}
+
+		zlOff = ziplistInsert(db.arena, zlOff, []byte(field), false)
+		zlOff = ziplistInsert(db.arena, zlOff, value.Bytes(), false)
+		db.ObjectSetDataOffset(headOff, zlOff)
+		return true
+	}
+	return false
+}
+
+func (db *RedisDB) HIncrByFloat(key string, field string, inc float64) (float64, error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	keyBytes := []byte(key)
+	headOff, ok := db.dict.Get(keyBytes)
+
+	if !ok {
+		zlOff := ziplistNew(db.arena)
+		zlOff = ziplistInsert(db.arena, zlOff, []byte(field), false)
+		valStr := strconv.FormatFloat(inc, 'f', -1, 64)
+		zlOff = ziplistInsert(db.arena, zlOff, []byte(valStr), false)
+		headOff = db.NewObject(ObjHash, ObjEncodingZiplist, zlOff)
+		db.dict.Set(keyBytes, headOff)
+		return inc, nil
+	}
+
+	enc := db.ObjectEncoding(headOff)
+	dataOff := db.ObjectDataOffset(headOff)
+
+	if enc == ObjEncodingZiplist {
+		zlOff := dataOff
+		n := ziplistLen(db.arena, zlOff)
+		pos := zlOff + ziplistHeaderSize
+		for i := 0; i < n; i += 2 {
+			if ziplistEntryDataEquals(db.arena, pos, []byte(field)) {
+				v := ziplistGet(db.arena, zlOff, i+1)
+				oldVal, err := strconv.ParseFloat(string(v), 64)
+				if err != nil {
+					return 0, err
+				}
+				newVal := oldVal + inc
+				newStr := strconv.FormatFloat(newVal, 'f', -1, 64)
+				zlOff = ziplistDelete(db.arena, zlOff, i+1)
+				zlOff = ziplistInsertAt(db.arena, zlOff, i+1, []byte(newStr))
+				db.ObjectSetDataOffset(headOff, zlOff)
+				return newVal, nil
+			}
+			pos += ziplistEntryTotalSize(db.arena, pos)
+			pos += ziplistEntryTotalSize(db.arena, pos)
+		}
+
+		zlOff = ziplistInsert(db.arena, zlOff, []byte(field), false)
+		valStr := strconv.FormatFloat(inc, 'f', -1, 64)
+		zlOff = ziplistInsert(db.arena, zlOff, []byte(valStr), false)
+		db.ObjectSetDataOffset(headOff, zlOff)
+		return inc, nil
+	}
+	return 0, nil
 }
