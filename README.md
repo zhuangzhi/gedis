@@ -3,11 +3,20 @@
 [English](./README_EN.md)
 
 [![Go Version](https://img.shields.io/badge/Go-1.21%2B-blue)](https://go.dev/)
-[![Test](https://img.shields.io/badge/tests-59%20passed-brightgreen)](./redis_test.go)
+[![Test](https://img.shields.io/badge/tests-67%20passed-brightgreen)](./redis_test.go)
 [![Benchmark](https://img.shields.io/badge/benchmarks-70-f1c40f)](./redis_bench_test.go)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 
 gedis 是一个嵌入式 Redis-like 内存数据库，Go 语言实现。核心设计目标是 **零 GC 压力** —— 所有持久化数据存储在单一 `[]byte` Arena 中，使用整数偏移量替代 Go 指针，避免 GC 扫描结构化数据。
+
+**新增功能：**
+- 🔒 数据持久化：WAL + RDB 快照方案，支持 LZ4 压缩
+- ⏱️ TimeSeries 扩展：完整的时间序列功能，支持标签、聚合、批量查询、下采样规则
+
+**文档：**
+- [持久化方案设计](./PERSISTENCE_DESIGN.md)
+- [任务列表](./tasklist.md)
+- [API 文档](./API.md)
 
 ## 架构
 
@@ -312,10 +321,28 @@ func (db *RedisDB) XLen(key string) int
 ### TimeSeries
 
 ```go
+// 基础功能
 func (db *RedisDB) TSAdd(key string, ts int64, val float64) int
+func (db *RedisDB) TSAddWithLabels(key string, ts int64, val float64, labels map[string]string) int
+func (db *RedisDB) TSGetLabels(key string) map[string]string
 func (db *RedisDB) TSRange(key string, startTs, endTs int64) []TSPoint
+func (db *RedisDB) TSRevRange(key string, startTs, endTs int64) []TSPoint
 func (db *RedisDB) TSLast(key string) (int64, float64, bool)
 func (db *RedisDB) TSDel(key string, startTs, endTs int64) int
+
+// 聚合功能
+func (db *RedisDB) TSAggregate(points []TSPoint, agg TSAggregation) float64
+func (db *RedisDB) TSRangeWithAgg(key string, startTs, endTs int64, agg TSAggregation, bucketSize int64) []TSPoint
+func (db *RedisDB) TSRevRangeWithAgg(key string, startTs, endTs int64, agg TSAggregation, bucketSize int64) []TSPoint
+
+// 批量查询
+func (db *RedisDB) TSMGET(keys []string) []TSMGETResult
+func (db *RedisDB) TSMRANGE(startTs, endTs int64, labels map[string]string, agg TSAggregation, bucketSize int64, rev bool) []TSMRANGEResult
+func (db *RedisDB) TSQUERYINDEX(labels map[string]string) []TSMGETResult
+
+// 下采样/压缩规则
+func (db *RedisDB) TSCreateRule(key, destKey string, bucketSize int64, agg TSAggregation) bool
+func (db *RedisDB) TSDeleteRule(key, destKey string) bool
 ```
 
 ### Probabilistic
@@ -534,10 +561,15 @@ gedis/
 ├── search.go            # Search 命令
 ├── graph.go             # Graph 命令
 ├── cell.go              # 速率限制
-├── redis_test.go        # 单元测试 (59 tests)
+├── wal.go               # Write-Ahead Log (WAL) 持久化
+├── persistence.go       # 持久化管理器 (RDB 快照 + 恢复)
+├── redis_test.go        # 单元测试 (67 tests)
+├── wal_test.go          # WAL 单元测试
 ├── redis_bench_test.go  # 性能基准测试 (70 benchmarks)
 ├── example/             # 使用示例
 ├── API.md               # API 详细使用文档
+├── PERSISTENCE_DESIGN.md # 持久化方案设计文档
+├── tasklist.md          # 任务列表
 ```
 
 ## 测试
@@ -612,9 +644,7 @@ String, List, Hash, Set, Sorted Set, Bitmap, HyperLogLog, Geo, Stream, TimeSerie
 | `XGROUP CREATECONSUMER` | 创建消费者 |
 | `XGROUP DELCONSUMER` | 删除消费者 |
 
-### 📋 待实现功能
-
-#### TimeSeries 扩展
+### ✅ TimeSeries 扩展（已完成）
 
 | 命令 | 说明 |
 |------|------|
@@ -624,8 +654,21 @@ String, List, Hash, Set, Sorted Set, Bitmap, HyperLogLog, Geo, Stream, TimeSerie
 | `TS.RANGE` / `TS.REVRANGE` | 范围查询 |
 | `TS.MRANGE` / `TS.MREVRANGE` | 批量范围查询带标签过滤 |
 | `TS.QUERYINDEX` | 按标签查询时间序列 |
-| `TS.AGGREGATIONS` | 内置聚合函数 (avg, sum, min, max 等) |
+| `TS.AGGREGATIONS` | 内置聚合函数 (avg, sum, min, max, count, first, last, std.p, var.p, range) |
 | `TS.DELETERULE` | 删除压缩规则 |
+| `TS.AddWithLabels` | 添加带标签的时间序列数据 |
+| `TS.GetLabels` | 获取时间序列的标签 |
+
+### ✅ 数据持久化（已完成）
+
+| 功能 | 说明 |
+|------|------|
+| **WAL** | Write-Ahead Log，支持 LZ4 压缩、组提交、每秒 fsync |
+| **RDB 快照** | 内存数据二进制快照，支持增量持久化 |
+| **恢复流程** | 自动加载最新 RDB + 重放 WAL，保证数据一致性 |
+| **性能** | 1GB 数据压缩写入 ~1.5s，读取 ~1.4s |
+
+### 📋 待实现功能
 
 #### 低优先级（不常用/复杂）
 

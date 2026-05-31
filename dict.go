@@ -36,10 +36,11 @@ const (
 
 // Dict 使用 Arena 存储的哈希表
 type Dict struct {
-	arena *Arena // 关联的 Arena
-	table int    // 槽位数组在 Arena 中的偏移
-	size  int    // 槽位总数
-	used  int    // 已使用槽位数
+	arena           *Arena // 关联的 Arena
+	table           int    // 槽位数组在 Arena 中的偏移
+	size            int    // 槽位总数
+	used            int    // 已使用槽位数
+	rehashInProgress bool  // 防止嵌套 rehash
 }
 
 // NewDict 在给定 Arena 中创建一个新的 Dict。
@@ -118,7 +119,7 @@ func (d *Dict) keyEquals(keyOff int, key []byte) bool {
 
 // Set 插入或更新键值对。若 key 已存在则更新 valOff。
 func (d *Dict) Set(key []byte, valOff int) {
-	if d.used*100 >= d.size*dictLoadFactor {
+	if d.used*100 >= d.size*dictLoadFactor && !d.rehashInProgress {
 		d.rehash()
 	}
 
@@ -179,6 +180,9 @@ func (d *Dict) Del(key []byte) bool {
 
 // rehash 将哈希表扩容为 2 倍，重新哈希所有 key。
 func (d *Dict) rehash() {
+	d.rehashInProgress = true
+	defer func() { d.rehashInProgress = false }()
+
 	newSize := d.size * 2
 	newTableOff := d.arena.Alloc(newSize * dictSlotSize)
 
@@ -235,6 +239,43 @@ func fnv32Byte(b byte) uint32 {
 
 func (d *Dict) Len() int {
 	return d.used
+}
+
+type DictIterator struct {
+	d       *Dict
+	index   int
+	current int
+}
+
+func (d *Dict) Iterator() *DictIterator {
+	return &DictIterator{
+		d:       d,
+		index:   0,
+		current: 0,
+	}
+}
+
+func (it *DictIterator) Next() bool {
+	for it.index < it.d.size {
+		keyOff, _ := it.d.getSlot(it.index)
+		if keyOff != 0 {
+			it.current = it.index
+			it.index++
+			return true
+		}
+		it.index++
+	}
+	return false
+}
+
+func (it *DictIterator) Key() []byte {
+	keyOff, _ := it.d.getSlot(it.current)
+	return it.d.arena.ReadBytes(keyOff, it.d.arena.SizeAt(keyOff))
+}
+
+func (it *DictIterator) Value() int {
+	_, valOff := it.d.getSlot(it.current)
+	return valOff
 }
 
 func NewDictFromArena(arena *Arena, used int) *Dict {

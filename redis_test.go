@@ -2283,7 +2283,7 @@ func TestBitFieldBadArgs(t *testing.T) {
 
 func TestGraphAddNode(t *testing.T) {
 	db := New()
-	db.graphAddNode("g", "n1", []string{"Person"}, map[string]string{"name": "Alice"})
+	db.GraphAddNode("g", "n1", []string{"Person"}, map[string]string{"name": "Alice"})
 
 	if !db.Exists("g:node:n1") {
 		t.Fatal("node key should exist")
@@ -2292,9 +2292,9 @@ func TestGraphAddNode(t *testing.T) {
 
 func TestGraphAddEdge(t *testing.T) {
 	db := New()
-	db.graphAddNode("g", "n1", []string{"Person"}, nil)
-	db.graphAddNode("g", "n2", []string{"Person"}, nil)
-	db.graphAddEdge("g", "e1", "KNOWS", "n1", "n2", map[string]string{"since": "2024"})
+	db.GraphAddNode("g", "n1", []string{"Person"}, nil)
+	db.GraphAddNode("g", "n2", []string{"Person"}, nil)
+	db.GraphAddEdge("g", "e1", "KNOWS", "n1", "n2", map[string]string{"since": "2024"})
 
 	if !db.Exists("g:edge:e1") {
 		t.Fatal("edge key should exist")
@@ -5365,5 +5365,161 @@ func TestGetDelOnExpiredKeyReturnsNil(t *testing.T) {
 	val, ok := db.GetDel("key")
 	if ok || val != nil {
 		t.Fatalf("expected GetDel on expired key to return nil, got ok=%v, val=%v", ok, val)
+	}
+}
+
+func TestTSAggregate(t *testing.T) {
+	db := New()
+
+	db.TSAdd("sensor1", 1000, 10.0)
+	db.TSAdd("sensor1", 2000, 20.0)
+	db.TSAdd("sensor1", 3000, 30.0)
+	db.TSAdd("sensor1", 4000, 40.0)
+
+	points := db.TSRange("sensor1", 1000, 4000)
+
+	avg := db.TSAggregate(points, TSAggAvg)
+	if avg != 25.0 {
+		t.Fatalf("expected avg 25.0, got %v", avg)
+	}
+
+	sum := db.TSAggregate(points, TSAggSum)
+	if sum != 100.0 {
+		t.Fatalf("expected sum 100.0, got %v", sum)
+	}
+
+	min := db.TSAggregate(points, TSAggMin)
+	if min != 10.0 {
+		t.Fatalf("expected min 10.0, got %v", min)
+	}
+
+	max := db.TSAggregate(points, TSAggMax)
+	if max != 40.0 {
+		t.Fatalf("expected max 40.0, got %v", max)
+	}
+
+	count := db.TSAggregate(points, TSAggCount)
+	if count != 4.0 {
+		t.Fatalf("expected count 4.0, got %v", count)
+	}
+
+	first := db.TSAggregate(points, TSAggFirst)
+	if first != 10.0 {
+		t.Fatalf("expected first 10.0, got %v", first)
+	}
+
+	last := db.TSAggregate(points, TSAggLast)
+	if last != 40.0 {
+		t.Fatalf("expected last 40.0, got %v", last)
+	}
+}
+
+func TestTSRangeWithAgg(t *testing.T) {
+	db := New()
+
+	for i := int64(0); i < 10; i++ {
+		db.TSAdd("sensor1", i*1000, float64(i+1)*10.0)
+	}
+
+	points := db.TSRangeWithAgg("sensor1", 0, 10000, TSAggAvg, 3000)
+	if len(points) != 4 {
+		t.Fatalf("expected 4 buckets, got %d", len(points))
+	}
+}
+
+func TestTSRevRange(t *testing.T) {
+	db := New()
+
+	db.TSAdd("sensor1", 1000, 10.0)
+	db.TSAdd("sensor1", 2000, 20.0)
+	db.TSAdd("sensor1", 3000, 30.0)
+
+	points := db.TSRevRange("sensor1", 1000, 3000)
+	if len(points) != 3 {
+		t.Fatalf("expected 3 points, got %d", len(points))
+	}
+
+	if points[0].Value != 30.0 {
+		t.Fatalf("expected first point value 30.0 (reversed), got %v", points[0].Value)
+	}
+}
+
+func TestTSMGET(t *testing.T) {
+	db := New()
+
+	db.TSAddWithLabels("sensor1", 1000, 10.0, map[string]string{"type": "temp", "location": "room1"})
+	db.TSAddWithLabels("sensor2", 1000, 20.0, map[string]string{"type": "humidity", "location": "room1"})
+	db.TSAddWithLabels("sensor3", 1000, 30.0, map[string]string{"type": "temp", "location": "room2"})
+
+	results := db.TSMGET([]string{"sensor1", "sensor2", "sensor3"})
+
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(results))
+	}
+
+	if results[0].Key != "sensor1" {
+		t.Fatalf("expected key sensor1, got %s", results[0].Key)
+	}
+
+	if results[0].LatestVal != 10.0 {
+		t.Fatalf("expected value 10.0, got %v", results[0].LatestVal)
+	}
+}
+
+func TestTSMRANGE(t *testing.T) {
+	db := New()
+
+	db.TSAddWithLabels("sensor1", 1000, 10.0, map[string]string{"type": "temp", "location": "room1"})
+	db.TSAddWithLabels("sensor2", 1000, 20.0, map[string]string{"type": "humidity", "location": "room1"})
+	db.TSAddWithLabels("sensor3", 1000, 30.0, map[string]string{"type": "temp", "location": "room2"})
+
+	db.TSAdd("sensor1", 2000, 15.0)
+	db.TSAdd("sensor2", 2000, 25.0)
+	db.TSAdd("sensor3", 2000, 35.0)
+
+	results := db.TSMRANGE(0, 3000, map[string]string{"type": "temp"}, TSAggAvg, 0, false)
+
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results (sensor1, sensor3), got %d", len(results))
+	}
+}
+
+func TestTSQUERYINDEX(t *testing.T) {
+	db := New()
+
+	db.TSAddWithLabels("sensor1", 1000, 10.0, map[string]string{"type": "temp", "location": "room1"})
+	db.TSAddWithLabels("sensor2", 1000, 20.0, map[string]string{"type": "humidity", "location": "room1"})
+	db.TSAddWithLabels("sensor3", 1000, 30.0, map[string]string{"type": "temp", "location": "room2"})
+
+	results := db.TSQUERYINDEX(map[string]string{"type": "temp"})
+
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results (sensor1, sensor3), got %d", len(results))
+	}
+
+	for _, r := range results {
+		if r.Labels["type"] != "temp" {
+			t.Fatalf("expected type=temp, got type=%s", r.Labels["type"])
+		}
+	}
+}
+
+func TestTSCreateRule(t *testing.T) {
+	db := New()
+
+	db.TSAdd("source", 1000, 10.0)
+	db.TSAdd("source", 1500, 15.0)
+	db.TSAdd("source", 2000, 20.0)
+	db.TSAdd("source", 2500, 25.0)
+	db.TSAdd("source", 3000, 30.0)
+
+	ok := db.TSCreateRule("source", "dest", 2000, TSAggAvg)
+	if !ok {
+		t.Fatal("expected TSCreateRule to succeed")
+	}
+
+	points := db.TSRange("source", 0, 5000)
+	if len(points) != 5 {
+		t.Fatalf("expected 5 points in source, got %d", len(points))
 	}
 }

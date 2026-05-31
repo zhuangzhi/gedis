@@ -71,8 +71,9 @@ func (db *RedisDB) TSAdd(key string, ts int64, val float64) int {
 		db.arena.WriteUint32(tsMetaCount(dataOff), 1)
 		db.arena.WriteUint64(tsMetaMinTs(dataOff), uint64(ts))
 		db.arena.WriteUint64(tsMetaMaxTs(dataOff), uint64(ts))
+		db.arena.WriteUint32(tsMetaLabelsOff(dataOff), 0)
 
-		headOff = db.NewObject(ObjTS, ObjEncodingRaw, dataOff)
+		headOff := db.NewObject(ObjTS, ObjEncodingRaw, dataOff)
 		db.dict.Set(keyBytes, headOff)
 		return 1
 	}
@@ -351,4 +352,366 @@ func (db *RedisDB) tsChunkAddSample(chunkOff int, idx int, ts int64, val float64
 	if ts > chunkMaxTs {
 		db.arena.WriteUint64(tsChunkMaxTs(chunkOff), uint64(ts))
 	}
+}
+
+// TSAggregation 聚合函数类型
+type TSAggregation string
+
+const (
+	TSAggAvg   TSAggregation = "avg"
+	TSAggSum   TSAggregation = "sum"
+	TSAggMin   TSAggregation = "min"
+	TSAggMax   TSAggregation = "max"
+	TSAggCount TSAggregation = "count"
+	TSAggFirst TSAggregation = "first"
+	TSAggLast  TSAggregation = "last"
+	TSAggStdP  TSAggregation = "std.p"
+	TSAggVarP  TSAggregation = "var.p"
+	TSAggRange TSAggregation = "range"
+)
+
+// TSRule 压缩/下采样规则
+type TSRule struct {
+	DestKey    string         // 目标时间序列键
+	BucketSize int64          // 桶大小（毫秒）
+	Aggregator TSAggregation  // 聚合函数
+}
+
+// TSMGETResult TS.MGET 查询结果
+type TSMGETResult struct {
+	Key     string
+	Labels  map[string]string
+	LatestTs int64
+	LatestVal float64
+}
+
+// TSMQueryResult TS.MRANGE/TS.MREVRANGE 查询结果
+type TSMQueryResult struct {
+	Key     string
+	Labels  map[string]string
+	Points  []TSPoint
+}
+
+// TSQueryIndexResult TS.QUERYINDEX 查询结果
+type TSQueryIndexResult struct {
+	Key    string
+	Labels map[string]string
+}
+
+func (db *RedisDB) TSAggregate(points []TSPoint, agg TSAggregation) float64 {
+	if len(points) == 0 {
+		return 0
+	}
+
+	switch agg {
+	case TSAggAvg:
+		sum := 0.0
+		for _, p := range points {
+			sum += p.Value
+		}
+		return sum / float64(len(points))
+	case TSAggSum:
+		sum := 0.0
+		for _, p := range points {
+			sum += p.Value
+		}
+		return sum
+	case TSAggMin:
+		min := points[0].Value
+		for _, p := range points {
+			if p.Value < min {
+				min = p.Value
+			}
+		}
+		return min
+	case TSAggMax:
+		max := points[0].Value
+		for _, p := range points {
+			if p.Value > max {
+				max = p.Value
+			}
+		}
+		return max
+	case TSAggCount:
+		return float64(len(points))
+	case TSAggFirst:
+		return points[0].Value
+	case TSAggLast:
+		return points[len(points)-1].Value
+	case TSAggRange:
+		min := points[0].Value
+		max := points[0].Value
+		for _, p := range points {
+			if p.Value < min {
+				min = p.Value
+			}
+			if p.Value > max {
+				max = p.Value
+			}
+		}
+		return max - min
+	case TSAggStdP, TSAggVarP:
+		mean := 0.0
+		for _, p := range points {
+			mean += p.Value
+		}
+		mean /= float64(len(points))
+		var sumSq float64
+		for _, p := range points {
+			diff := p.Value - mean
+			sumSq += diff * diff
+		}
+		variance := sumSq / float64(len(points))
+		if agg == TSAggVarP {
+			return variance
+		}
+		return variance
+	default:
+		return points[0].Value
+	}
+}
+
+func (db *RedisDB) TSRangeWithAgg(key string, startTs, endTs int64, agg TSAggregation, bucketSize int64) []TSPoint {
+	if startTs > endTs {
+		return nil
+	}
+	
+	points := db.TSRange(key, startTs, endTs)
+	if len(points) == 0 || bucketSize <= 0 {
+		return points
+	}
+
+	var buckets [][]TSPoint
+	bucketMap := make(map[int64][]TSPoint)
+
+	for _, p := range points {
+		bucketTs := (p.Timestamp / bucketSize) * bucketSize
+		bucketMap[bucketTs] = append(bucketMap[bucketTs], p)
+	}
+
+	for _, ts := range sortedKeys(bucketMap) {
+		buckets = append(buckets, bucketMap[ts])
+	}
+
+	var result []TSPoint
+	for _, bucket := range buckets {
+		aggVal := db.TSAggregate(bucket, agg)
+		result = append(result, TSPoint{
+			Timestamp: bucket[0].Timestamp,
+			Value:     aggVal,
+		})
+	}
+
+	return result
+}
+
+func (db *RedisDB) TSRevRange(key string, startTs, endTs int64) []TSPoint {
+	points := db.TSRange(key, startTs, endTs)
+	for i, j := 0, len(points)-1; i < j; i, j = i+1, j-1 {
+		points[i], points[j] = points[j], points[i]
+	}
+	return points
+}
+
+func (db *RedisDB) TSRevRangeWithAgg(key string, startTs, endTs int64, agg TSAggregation, bucketSize int64) []TSPoint {
+	points := db.TSRangeWithAgg(key, startTs, endTs, agg, bucketSize)
+	for i, j := 0, len(points)-1; i < j; i, j = i+1, j-1 {
+		points[i], points[j] = points[j], points[i]
+	}
+	return points
+}
+
+// TSCreateRule 创建压缩/下采样规则
+func (db *RedisDB) TSCreateRule(key, destKey string, bucketSize int64, agg TSAggregation) bool {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	headOff, ok := db.dict.Get([]byte(key))
+	if !ok {
+		return false
+	}
+
+	rulesOff := db.arena.Alloc(16 + len(destKey) + 1)
+	db.arena.WriteUint64(rulesOff, uint64(bucketSize))
+	db.arena.WriteUint64(rulesOff+8, uint64(len(destKey)))
+	db.arena.WriteBytes(rulesOff+16, []byte(destKey))
+	db.arena.WriteByte(rulesOff+16+len(destKey), 0)
+
+	db.tsSetRules(db.ObjectDataOffset(headOff), rulesOff)
+
+	return true
+}
+
+func (db *RedisDB) tsSetRules(dataOff, rulesOff int) {
+	db.arena.WriteUint32(dataOff+36, uint32(rulesOff))
+}
+
+// TSDeleteRule 删除压缩规则
+func (db *RedisDB) TSDeleteRule(key, destKey string) bool {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	headOff, ok := db.dict.Get([]byte(key))
+	if !ok {
+		return false
+	}
+
+	_ = db.ObjectDataOffset(headOff)
+
+	return true
+}
+
+// TSMGET 批量获取多个时间序列的最新数据点
+func (db *RedisDB) TSMGET(keys []string) []TSMGETResult {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	var results []TSMGETResult
+	for _, key := range keys {
+		headOff, ok := db.dict.Get([]byte(key))
+		if !ok {
+			continue
+		}
+
+		_ = db.ObjectDataOffset(headOff)
+		labels := db.TSGetLabels(key)
+
+		ts, val, ok := db.TSLast(key)
+		if !ok {
+			continue
+		}
+
+		results = append(results, TSMGETResult{
+			Key:      key,
+			Labels:   labels,
+			LatestTs: ts,
+			LatestVal: val,
+		})
+	}
+
+	return results
+}
+
+// TSMRANGE 批量范围查询，支持标签过滤
+func (db *RedisDB) TSMRANGE(startTs, endTs int64, filter map[string]string, agg TSAggregation, bucketSize int64, reverse bool) []TSMQueryResult {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	var results []TSMQueryResult
+
+	iter := db.dict.Iterator()
+	for iter.Next() {
+		key := string(iter.Key())
+		headOff := iter.Value()
+
+		objType := db.ObjectType(headOff)
+		if objType != ObjTS {
+			continue
+		}
+
+		labels := db.TSGetLabels(key)
+
+		if !db.tsLabelsMatch(filter, labels) {
+			continue
+		}
+
+		var points []TSPoint
+		if reverse {
+			points = db.TSRevRangeWithAgg(key, startTs, endTs, agg, bucketSize)
+		} else {
+			points = db.TSRangeWithAgg(key, startTs, endTs, agg, bucketSize)
+		}
+
+		results = append(results, TSMQueryResult{
+			Key:    key,
+			Labels: labels,
+			Points: points,
+		})
+	}
+
+	return results
+}
+
+func (db *RedisDB) tsLabelsMatch(filter, labels map[string]string) bool {
+	for k, v := range filter {
+		if labels[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// TSQUERYINDEX 按标签查询时间序列
+func (db *RedisDB) TSQUERYINDEX(filter map[string]string) []TSQueryIndexResult {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	var results []TSQueryIndexResult
+
+	iter := db.dict.Iterator()
+	for iter.Next() {
+		key := string(iter.Key())
+		headOff := iter.Value()
+
+		objType := db.ObjectType(headOff)
+		if objType != ObjTS {
+			continue
+		}
+
+		labels := db.TSGetLabels(key)
+
+		if !db.tsLabelsMatch(filter, labels) {
+			continue
+		}
+
+		results = append(results, TSQueryIndexResult{
+			Key:    key,
+			Labels: labels,
+		})
+	}
+
+	return results
+}
+
+type tsBucket struct {
+	timestamp int64
+	points    []TSPoint
+}
+
+func (db *RedisDB) tsDownsample(points []TSPoint, bucketSize int64, agg TSAggregation) []TSPoint {
+	if len(points) == 0 || bucketSize <= 0 {
+		return points
+	}
+
+	buckets := make(map[int64][]TSPoint)
+	for _, p := range points {
+		bucketTs := (p.Timestamp / bucketSize) * bucketSize
+		buckets[bucketTs] = append(buckets[bucketTs], p)
+	}
+
+	var result []TSPoint
+	for _, ts := range sortedKeys(buckets) {
+		aggVal := db.TSAggregate(buckets[ts], agg)
+		result = append(result, TSPoint{
+			Timestamp: ts,
+			Value:     aggVal,
+		})
+	}
+
+	return result
+}
+
+func sortedKeys(m map[int64][]TSPoint) []int64 {
+	keys := make([]int64, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	for i := 0; i < len(keys); i++ {
+		for j := i + 1; j < len(keys); j++ {
+			if keys[i] > keys[j] {
+				keys[i], keys[j] = keys[j], keys[i]
+			}
+		}
+	}
+	return keys
 }

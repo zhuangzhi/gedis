@@ -39,7 +39,10 @@ func (db *RedisDB) ZAdd(key string, score float64, member []byte) int {
 func (db *RedisDB) ZAddBuffer(key string, score float64, member *PooledBuffer) int {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	return db.zAddBufferLocked(key, score, member)
+}
 
+func (db *RedisDB) zAddBufferLocked(key string, score float64, member *PooledBuffer) int {
 	keyBytes := []byte(key)
 	headOff, ok := db.dict.Get(keyBytes)
 
@@ -558,18 +561,22 @@ func (db *RedisDB) ZLexCount(key string, min, max string) int {
 			memberStr := string(member)
 
 			minOk := true
-			if len(min) > 0 && min != "-" {
+			if len(min) > 0 && min != "-" && min != "+" {
 				if min[0] == '(' {
 					minOk = memberStr > min[1:]
+				} else if min[0] == '[' {
+					minOk = memberStr >= min[1:]
 				} else {
 					minOk = memberStr >= min
 				}
 			}
 
 			maxOk := true
-			if len(max) > 0 && max != "+" {
+			if len(max) > 0 && max != "+" && max != "-" {
 				if max[0] == '(' {
 					maxOk = memberStr < max[1:]
+				} else if max[0] == '[' {
+					maxOk = memberStr <= max[1:]
 				} else {
 					maxOk = memberStr <= max
 				}
@@ -579,7 +586,7 @@ func (db *RedisDB) ZLexCount(key string, min, max string) int {
 				count++
 			}
 
-			if memberStr > max && max != "+" {
+			if memberStr > stripLexBound(max) && max != "+" && max != "-" {
 				break
 			}
 			x = int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, x, 0)))
@@ -587,6 +594,13 @@ func (db *RedisDB) ZLexCount(key string, min, max string) int {
 	}
 
 	return count
+}
+
+func stripLexBound(s string) string {
+	if len(s) > 0 && (s[0] == '[' || s[0] == '(') {
+		return s[1:]
+	}
+	return s
 }
 
 func (db *RedisDB) ZRangeByLex(key string, min, max string) *ZSlices {
@@ -613,18 +627,22 @@ func (db *RedisDB) ZRangeByLex(key string, min, max string) *ZSlices {
 			memberStr := string(member)
 
 			minOk := true
-			if len(min) > 0 && min != "-" {
+			if len(min) > 0 && min != "-" && min != "+" {
 				if min[0] == '(' {
 					minOk = memberStr > min[1:]
+				} else if min[0] == '[' {
+					minOk = memberStr >= min[1:]
 				} else {
 					minOk = memberStr >= min
 				}
 			}
 
 			maxOk := true
-			if len(max) > 0 && max != "+" {
+			if len(max) > 0 && max != "+" && max != "-" {
 				if max[0] == '(' {
 					maxOk = memberStr < max[1:]
+				} else if max[0] == '[' {
+					maxOk = memberStr <= max[1:]
 				} else {
 					maxOk = memberStr <= max
 				}
@@ -634,11 +652,12 @@ func (db *RedisDB) ZRangeByLex(key string, min, max string) *ZSlices {
 				result.Add(member)
 			}
 
-			if memberStr > max && max != "+" {
+			if memberStr > stripLexBound(max) && max != "+" && max != "-" {
 				break
 			}
 			x = int(db.arena.ReadUint32(zslLevelForwardOff(db.arena, x, 0)))
 		}
+
 		result.Finish()
 		return result
 	}

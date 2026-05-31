@@ -24,6 +24,7 @@
 package gedis
 
 import (
+	"fmt"
 	"strings"
 )
 
@@ -47,7 +48,13 @@ type GraphResult struct {
 	Edges []GraphEdge
 }
 
-func (db *RedisDB) graphAddNode(graphName, nodeID string, labels []string, props map[string]string) {
+func (db *RedisDB) GraphAddNode(graphName, nodeID string, labels []string, props map[string]string) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	db.graphAddNodeLocked(graphName, nodeID, labels, props)
+}
+
+func (db *RedisDB) graphAddNodeLocked(graphName, nodeID string, labels []string, props map[string]string) {
 	nodeKey := graphName + ":node:" + nodeID
 
 	nodeData := serializeGraphEntity(labels, props)
@@ -69,18 +76,54 @@ func (db *RedisDB) graphAddNode(graphName, nodeID string, labels []string, props
 
 	for _, label := range labels {
 		labelIdxKey := graphName + ":label:" + label
-		pb := Buf(nodeID)
-		db.SAddBuffer(labelIdxKey, pb)
-		pb.Close()
+		labelKeyBytes := []byte(labelIdxKey)
+
+		existingOff, exists := db.dict.Get(labelKeyBytes)
+		if exists {
+			enc := db.ObjectEncoding(existingOff)
+			dataOff := db.ObjectDataOffset(existingOff)
+
+			if enc == ObjEncodingIntset && dataOff != 0 {
+				isOff := int(dataOff)
+				if isOff != 0 {
+					db.arena.Free(isOff)
+				}
+				db.dict.Del(labelKeyBytes)
+				innerDict := NewDict(db.arena)
+				innerDict.Set([]byte(nodeID), 0)
+				dictMetaOff := db.arena.Alloc(12)
+				innerDict.StoreMeta(dictMetaOff)
+				labelHeadOff := db.NewObject(ObjSet, ObjEncodingHashtable, dictMetaOff)
+				db.dict.Set(labelKeyBytes, labelHeadOff)
+			} else if enc == ObjEncodingHashtable && dataOff != 0 {
+				innerDict := LoadDictMeta(db.arena, dataOff)
+				if innerDict != nil {
+					innerDict.Set([]byte(nodeID), 0)
+				}
+			}
+		} else {
+			innerDict := NewDict(db.arena)
+			innerDict.Set([]byte(nodeID), 0)
+			dictMetaOff := db.arena.Alloc(12)
+			innerDict.StoreMeta(dictMetaOff)
+			labelHeadOff := db.NewObject(ObjSet, ObjEncodingHashtable, dictMetaOff)
+			db.dict.Set(labelKeyBytes, labelHeadOff)
+		}
 	}
 }
 
-func (db *RedisDB) graphAddEdge(graphName, edgeID, edgeType, sourceID, targetID string, props map[string]string) {
-	edgeKey := graphName + ":edge:" + edgeID
-	outKey := graphName + ":out:" + sourceID + ":" + edgeType
-	inKey := graphName + ":in:" + targetID + ":" + edgeType
+func (db *RedisDB) GraphAddEdge(graphName, edgeID, edgeType, srcNodeID, dstNodeID string, props map[string]string) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	db.graphAddEdgeLocked(graphName, edgeID, edgeType, srcNodeID, dstNodeID, props)
+}
 
-	edgeData := append([]byte(edgeType+"|"+sourceID+"|"+targetID+"|"), serializeGraphEntity(nil, props)...)
+func (db *RedisDB) graphAddEdgeLocked(graphName, edgeID, edgeType, srcNodeID, dstNodeID string, props map[string]string) {
+	edgeKey := graphName + ":edge:" + edgeID
+	outKey := graphName + ":out:" + srcNodeID + ":" + edgeType + ":" + edgeID
+	inKey := graphName + ":in:" + dstNodeID + ":" + edgeType + ":" + edgeID
+
+	edgeData := append([]byte(edgeType+"|"+srcNodeID+"|"+dstNodeID+"|"), serializeGraphEntity(nil, props)...)
 	dataOff := db.arena.AllocBytes(edgeData)
 
 	existingHeadOff, exists := db.dict.Get([]byte(edgeKey))
@@ -97,34 +140,117 @@ func (db *RedisDB) graphAddEdge(graphName, edgeID, edgeType, sourceID, targetID 
 		db.dict.Set([]byte(edgeKey), headOff)
 	}
 
-	pb1 := Buf(edgeID)
-	db.ZAddBuffer(outKey, 0, pb1)
-	pb1.Close()
-
-	pb2 := Buf(edgeID)
-	db.ZAddBuffer(inKey, 0, pb2)
-	pb2.Close()
+	db.dict.Set([]byte(outKey), headOff)
+	db.dict.Set([]byte(inKey), headOff)
 }
 
-func (db *RedisDB) GraphQuery(graphName, cypher string) ([]GraphResult, error) {
+func (db *RedisDB) GraphGetNode(graphName, nodeID string) *GraphNode {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	return db.getGraphNode(graphName, nodeID)
+}
+
+func (db *RedisDB) GraphGetEdge(graphName, edgeID string) *GraphEdge {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	return db.buildGraphEdge(graphName, edgeID)
+}
+
+func (db *RedisDB) GraphDeleteNode(graphName, nodeID string) bool {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	nodeKey := graphName + ":node:" + nodeID
+	headOff, ok := db.dict.Get([]byte(nodeKey))
+	if !ok {
+		return false
+	}
+
+	edges := db.getAllEdgeIDs(graphName)
+	for _, edgeID := range edges {
+		edgeInfo := db.getGraphEdge(graphName, edgeID)
+		if edgeInfo != nil && (edgeInfo[1] == nodeID || edgeInfo[2] == nodeID) {
+			edgeKey := graphName + ":edge:" + edgeID
+			db.dict.Del([]byte(edgeKey))
+		}
+	}
+
+	db.dict.Del([]byte(nodeKey))
+	_ = headOff
+	return true
+}
+
+func (db *RedisDB) GraphListNodes(graphName string) []GraphNode {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
+	nodeIDs := db.getAllNodeIDs(graphName)
+	nodes := make([]GraphNode, 0, len(nodeIDs))
+	for _, id := range nodeIDs {
+		node := db.getGraphNode(graphName, id)
+		if node != nil {
+			nodes = append(nodes, *node)
+		}
+	}
+	return nodes
+}
+
+func (db *RedisDB) GraphListEdges(graphName string) []GraphEdge {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	edgeIDs := db.getAllEdgeIDs(graphName)
+	edges := make([]GraphEdge, 0, len(edgeIDs))
+	for _, id := range edgeIDs {
+		edge := db.buildGraphEdge(graphName, id)
+		if edge != nil {
+			edges = append(edges, *edge)
+		}
+	}
+	return edges
+}
+
+func (db *RedisDB) GraphQuery(graphName, cypher string) ([]GraphResult, error) {
 	cypher = strings.TrimSpace(cypher)
 	upper := strings.ToUpper(cypher)
 
+	if strings.HasPrefix(upper, "CREATE") {
+		db.mu.Lock()
+		defer db.mu.Unlock()
+		return db.graphQueryCreate(graphName, cypher)
+	}
+
 	if strings.HasPrefix(upper, "MATCH") {
+		db.mu.RLock()
+		defer db.mu.RUnlock()
 		return db.graphQueryMatch(graphName, cypher)
+	}
+
+	if strings.HasPrefix(upper, "DELETE") {
+		db.mu.Lock()
+		defer db.mu.Unlock()
+		return db.graphQueryDelete(graphName, cypher)
 	}
 
 	return nil, nil
 }
 
 func (db *RedisDB) graphQueryMatch(graphName, cypher string) ([]GraphResult, error) {
+	whereConditions := make(map[string]string)
 	returnClause := ""
-	if idx := strings.Index(strings.ToUpper(cypher), "RETURN"); idx >= 0 {
-		returnClause = strings.TrimSpace(cypher[idx+6:])
-		cypher = strings.TrimSpace(cypher[:idx])
+
+	upper := strings.ToUpper(cypher)
+	
+	if returnIdx := strings.Index(upper, "RETURN"); returnIdx >= 0 {
+		returnClause = strings.TrimSpace(cypher[returnIdx+6:])
+		cypher = strings.TrimSpace(cypher[:returnIdx])
+		upper = strings.ToUpper(cypher)
+	}
+
+	if whereIdx := strings.Index(upper, "WHERE"); whereIdx >= 0 {
+		whereStr := strings.TrimSpace(cypher[whereIdx+5:])
+		cypher = strings.TrimSpace(cypher[:whereIdx])
+		whereConditions = parseWhereConditions(whereStr)
 	}
 
 	cypher = strings.TrimPrefix(cypher, "MATCH")
@@ -207,13 +333,50 @@ func (db *RedisDB) graphQueryMatch(graphName, cypher string) ([]GraphResult, err
 
 			srcNode := db.getGraphNode(graphName, srcID)
 			tgtNode := db.getGraphNode(graphName, targetID)
+
+			if len(whereConditions) > 0 {
+				matched := false
+				for key, value := range whereConditions {
+					propKey := key
+					if idx := strings.Index(key, "."); idx >= 0 {
+						propKey = key[idx+1:]
+					}
+					if srcNode.Properties[propKey] == value || tgtNode.Properties[propKey] == value {
+						matched = true
+						break
+					}
+				}
+				if !matched {
+					continue
+				}
+			}
+
 			edge := db.buildGraphEdge(graphName, edgeID)
 
-			result := GraphResult{
-				Nodes: []GraphNode{*srcNode, *tgtNode},
-				Edges: []GraphEdge{*edge},
+			result := GraphResult{}
+
+			if returnClause == "" || strings.Contains(strings.ToUpper(returnClause), "COUNT") {
+				result.Nodes = []GraphNode{*srcNode, *tgtNode}
+				result.Edges = []GraphEdge{*edge}
+			} else {
+				if strings.Contains(strings.ToUpper(returnClause), sourceVar) || strings.Contains(strings.ToUpper(returnClause), "*") {
+					if !containsNode(result.Nodes, *srcNode) {
+						result.Nodes = append(result.Nodes, *srcNode)
+					}
+				}
+				if strings.Contains(strings.ToUpper(returnClause), targetVar) || strings.Contains(strings.ToUpper(returnClause), "*") {
+					if !containsNode(result.Nodes, *tgtNode) {
+						result.Nodes = append(result.Nodes, *tgtNode)
+					}
+				}
+				if strings.Contains(strings.ToUpper(returnClause), edgeVar) || strings.Contains(strings.ToUpper(returnClause), "*") {
+					result.Edges = append(result.Edges, *edge)
+				}
 			}
-			results = append(results, result)
+
+			if len(result.Nodes) > 0 || len(result.Edges) > 0 {
+				results = append(results, result)
+			}
 		}
 	}
 
@@ -225,34 +388,259 @@ func (db *RedisDB) graphQueryMatch(graphName, cypher string) ([]GraphResult, err
 	return results, nil
 }
 
+func (db *RedisDB) graphQueryCreate(graphName, cypher string) ([]GraphResult, error) {
+	cypher = strings.TrimPrefix(cypher, "CREATE")
+	cypher = strings.TrimSpace(cypher)
+
+	cypher = strings.TrimPrefix(cypher, "(")
+	cypher = strings.TrimSuffix(cypher, ")")
+
+	var results []GraphResult
+
+	parts := strings.Split(cypher, "->")
+	for i, part := range parts {
+		part = strings.TrimSpace(part)
+		part = strings.Trim(part, "()[]")
+
+		if strings.Contains(part, ":") {
+			labelParts := strings.SplitN(part, ":", 2)
+			varName := strings.TrimSpace(labelParts[0])
+			rest := strings.TrimSpace(labelParts[1])
+
+			props := make(map[string]string)
+			if idx := strings.Index(rest, "{"); idx >= 0 {
+				propStr := rest[idx:]
+				rest = strings.TrimSpace(rest[:idx])
+				propStr = strings.Trim(propStr, "{}")
+				for _, kv := range strings.Split(propStr, ",") {
+					kvParts := strings.SplitN(kv, ":", 2)
+					if len(kvParts) == 2 {
+						props[strings.TrimSpace(kvParts[0])] = strings.TrimSpace(kvParts[1])
+					}
+				}
+			}
+
+			if rest != "" {
+				nodeLabel := rest
+				nodeID := fmt.Sprintf("node_%d_%s", i, varName)
+				if existingID := db.findNodeByProperty(graphName, varName, props); existingID != "" {
+					nodeID = existingID
+				} else {
+					db.graphAddNodeLocked(graphName, nodeID, []string{nodeLabel}, props)
+				}
+				node := db.getGraphNode(graphName, nodeID)
+				results = append(results, GraphResult{Nodes: []GraphNode{*node}})
+			}
+		}
+
+		if i < len(parts)-1 {
+			edgePart := strings.TrimSpace(parts[i+1])
+			edgePart = strings.Trim(edgePart, "()[]")
+
+			var edgeType, tgtVar string
+			if strings.Contains(edgePart, ":") {
+				edgeParts := strings.SplitN(edgePart, ":", 2)
+				_ = strings.TrimSpace(edgeParts[0])
+				edgeType = strings.TrimSpace(edgeParts[1])
+				edgeParts2 := strings.SplitN(edgePart, "(", 2)
+				if len(edgeParts2) > 1 {
+					tgtPart := strings.Trim(edgeParts2[1], ")")
+					tgtParts := strings.SplitN(tgtPart, ":", 2)
+					tgtVar = strings.TrimSpace(tgtParts[0])
+				}
+			}
+
+			if edgeType != "" {
+				edgeID := fmt.Sprintf("edge_%d_%s", i, edgeType)
+				props := make(map[string]string)
+				if idx := strings.Index(edgePart, "{"); idx >= 0 {
+					propStr := edgePart[idx:]
+					propStr = strings.Trim(propStr, "{}")
+					for _, kv := range strings.Split(propStr, ",") {
+						kvParts := strings.SplitN(kv, ":", 2)
+						if len(kvParts) == 2 {
+							props[strings.TrimSpace(kvParts[0])] = strings.TrimSpace(kvParts[1])
+						}
+					}
+				}
+
+				lastNodeID := ""
+				if len(results) > 0 && len(results[len(results)-1].Nodes) > 0 {
+					lastNodeID = results[len(results)-1].Nodes[len(results[len(results)-1].Nodes)-1].ID
+				}
+
+				db.graphAddEdgeLocked(graphName, edgeID, edgeType, lastNodeID, tgtVar, props)
+			}
+		}
+	}
+
+	return results, nil
+}
+
+func (db *RedisDB) graphQueryDelete(graphName, cypher string) ([]GraphResult, error) {
+	cypher = strings.TrimPrefix(cypher, "DELETE")
+	cypher = strings.TrimSpace(cypher)
+
+	var results []GraphResult
+
+	if strings.HasPrefix(strings.ToUpper(cypher), "NODE") {
+		cypher = strings.TrimPrefix(cypher, "NODE")
+		cypher = strings.TrimSpace(cypher)
+		cypher = strings.Trim(cypher, "()")
+
+		if nodeID := strings.TrimSpace(cypher); nodeID != "" {
+			nodeKey := graphName + ":node:" + nodeID
+			headOff, ok := db.dict.Get([]byte(nodeKey))
+			if ok {
+				node := db.getGraphNode(graphName, nodeID)
+				results = append(results, GraphResult{Nodes: []GraphNode{*node}})
+				db.dict.Del([]byte(nodeKey))
+				_ = headOff
+			}
+		}
+	}
+
+	return results, nil
+}
+
+func (db *RedisDB) findNodeByProperty(graphName, varName string, props map[string]string) string {
+	return ""
+}
+
+func parseWhereConditions(whereStr string) map[string]string {
+	conditions := make(map[string]string)
+	whereStr = strings.TrimSpace(whereStr)
+
+	parts := strings.Split(whereStr, "AND")
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		for _, op := range []string{"=", "!=", ">=", "<=", ">", "<"} {
+			if idx := strings.Index(part, op); idx >= 0 {
+				key := strings.TrimSpace(part[:idx])
+				value := strings.TrimSpace(part[idx+len(op):])
+				key = strings.Trim(key, " .")
+				value = strings.Trim(value, " '\"")
+
+				conditions[key] = value
+				break
+			}
+		}
+	}
+	return conditions
+}
+
+func nodeMatchesConditions(node *GraphNode, conditions map[string]string) bool {
+	for key, value := range conditions {
+		propKey := key
+		if idx := strings.Index(key, "."); idx >= 0 {
+			propKey = key[idx+1:]
+		}
+		if nodeVal, ok := node.Properties[propKey]; ok {
+			if nodeVal != value {
+				return false
+			}
+		} else {
+			return false
+		}
+	}
+	return true
+}
+
+func containsNode(nodes []GraphNode, node GraphNode) bool {
+	for _, n := range nodes {
+		if n.ID == node.ID {
+			return true
+		}
+	}
+	return false
+}
+
 func (db *RedisDB) getNodeIDsByLabel(graphName, label string) []string {
 	if label == "" {
 		return nil
 	}
 	labelIdxKey := graphName + ":label:" + label
-	members := db.SMembers(labelIdxKey)
-	if members == nil {
+	headOff, exists := db.dict.Get([]byte(labelIdxKey))
+	if !exists {
 		return nil
 	}
-	result := make([]string, members.Len())
-	for i := 0; i < members.Len(); i++ {
-		result[i] = string(members.Get(i))
+
+	enc := db.ObjectEncoding(headOff)
+	dataOff := db.ObjectDataOffset(headOff)
+
+	if enc == ObjEncodingIntset && dataOff != 0 {
+		isOff := int(dataOff)
+		n := intsetLen(db.arena, isOff)
+		result := make([]string, n)
+		for i := 0; i < n; i++ {
+			val := intsetGet(db.arena, isOff, i)
+			result[i] = fmt.Sprintf("%d", val)
+		}
+		return result
 	}
-	members.Close()
-	return result
+
+	if enc == ObjEncodingHashtable && dataOff != 0 {
+		innerDict := LoadDictMeta(db.arena, dataOff)
+		var result []string
+		iter := innerDict.Iterator()
+		for iter.Next() {
+			result = append(result, string(iter.Key()))
+		}
+		return result
+	}
+
+	return nil
 }
 
 func (db *RedisDB) getAllNodeIDs(graphName string) []string {
 	var result []string
+	prefix := graphName + ":node:"
+	iter := db.dict.Iterator()
+	for iter.Next() {
+		key := string(iter.Key())
+		if strings.HasPrefix(key, prefix) {
+			nodeID := strings.TrimPrefix(key, prefix)
+			result = append(result, nodeID)
+		}
+	}
+	return result
+}
+
+func (db *RedisDB) getAllEdgeIDs(graphName string) []string {
+	var result []string
+	prefix := graphName + ":edge:"
+	iter := db.dict.Iterator()
+	for iter.Next() {
+		key := string(iter.Key())
+		if strings.HasPrefix(key, prefix) {
+			edgeID := strings.TrimPrefix(key, prefix)
+			result = append(result, edgeID)
+		}
+	}
 	return result
 }
 
 func (db *RedisDB) getOutgoingEdges(graphName, nodeID, edgeType string) []string {
-	outKey := graphName + ":out:" + nodeID + ":" + edgeType
-	members := db.ZRange(outKey, 0, -1)
-	result := make([]string, members.Len())
-	for i := 0; i < members.Len(); i++ {
-		result[i] = string(members.Get(i))
+	prefix := graphName + ":edge:"
+	edgeIDs := db.getAllEdgeIDs(graphName)
+	var result []string
+	for _, edgeID := range edgeIDs {
+		edgeKey := prefix + edgeID
+		headOff, ok := db.dict.Get([]byte(edgeKey))
+		if !ok {
+			continue
+		}
+		dataOff := db.ObjectDataOffset(headOff)
+		if dataOff == 0 {
+			continue
+		}
+		size := db.arena.SizeAt(dataOff)
+		data := db.arena.ReadBytes(dataOff, size)
+		edgeData := string(data)
+		parts := strings.Split(edgeData, "|")
+		if len(parts) >= 3 && parts[1] == nodeID && parts[0] == edgeType {
+			result = append(result, edgeID)
+		}
 	}
 	return result
 }
@@ -341,4 +729,15 @@ func deserializeGraphEntity(data string) (labels []string, props map[string]stri
 		}
 	}
 	return
+}
+
+func stringToNodeIDHash(s string) uint64 {
+	var hash uint64 = 5381
+	for _, c := range s {
+		hash = ((hash << 5) + hash) + uint64(c)
+	}
+	if hash == 0 {
+		hash = 1
+	}
+	return hash
 }

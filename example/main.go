@@ -211,6 +211,69 @@ func main() {
 		}
 	}
 
+	fmt.Println("\n=== TimeSeries with Labels ===")
+	{
+		db.TSAddWithLabels("sensor:temp:room1", 1000, 22.5, map[string]string{"type": "temperature", "location": "room1", "unit": "celsius"})
+		db.TSAddWithLabels("sensor:temp:room2", 1000, 24.1, map[string]string{"type": "temperature", "location": "room2", "unit": "celsius"})
+		db.TSAddWithLabels("sensor:humidity:room1", 1000, 55.0, map[string]string{"type": "humidity", "location": "room1", "unit": "percent"})
+		db.TSAddWithLabels("sensor:humidity:room2", 1000, 60.0, map[string]string{"type": "humidity", "location": "room2", "unit": "percent"})
+
+		labels := db.TSGetLabels("sensor:temp:room1")
+		fmt.Printf("  Labels: %v\n", labels)
+
+		ts, val, _ := db.TSLast("sensor:temp:room1")
+		fmt.Printf("  TS.LAST sensor:temp:room1 = (%d, %.1f)\n", ts, val)
+	}
+
+	fmt.Println("\n=== TimeSeries Aggregation ===")
+	{
+		for i := int64(0); i < 10; i++ {
+			db.TSAdd("metrics:requests", i*1000, float64(100+i*10))
+		}
+
+		points := db.TSRange("metrics:requests", 0, 10000)
+		avg := db.TSAggregate(points, gedis.TSAggAvg)
+		sum := db.TSAggregate(points, gedis.TSAggSum)
+		min := db.TSAggregate(points, gedis.TSAggMin)
+		max := db.TSAggregate(points, gedis.TSAggMax)
+		count := db.TSAggregate(points, gedis.TSAggCount)
+		fmt.Printf("  Aggregates: avg=%.1f, sum=%.1f, min=%.1f, max=%.1f, count=%.0f\n", avg, sum, min, max, count)
+
+		buckets := db.TSRangeWithAgg("metrics:requests", 0, 10000, gedis.TSAggAvg, 3000)
+		fmt.Printf("  Bucketed avg (bucket=3000ms): %d buckets\n", len(buckets))
+		for _, p := range buckets {
+			fmt.Printf("    ts=%d, val=%.1f\n", p.Timestamp, p.Value)
+		}
+	}
+
+	fmt.Println("\n=== TimeSeries MGET (Batch Query) ===")
+	{
+		results := db.TSMGET([]string{"sensor:temp:room1", "sensor:temp:room2", "sensor:humidity:room1"})
+		for _, r := range results {
+			fmt.Printf("  %s: ts=%d, val=%.1f, labels=%v\n", r.Key, r.LatestTs, r.LatestVal, r.Labels)
+		}
+	}
+
+	fmt.Println("\n=== TimeSeries MRANGE (Multi-range with Filter) ===")
+	{
+		results := db.TSMRANGE(0, 2000, map[string]string{"type": "temperature"}, gedis.TSAggAvg, 0, false)
+		for _, r := range results {
+			fmt.Printf("  %s: %d points\n", r.Key, len(r.Points))
+			for _, p := range r.Points {
+				fmt.Printf("    ts=%d, val=%.1f\n", p.Timestamp, p.Value)
+			}
+		}
+	}
+
+	fmt.Println("\n=== TimeSeries QueryIndex ===")
+	{
+		results := db.TSQUERYINDEX(map[string]string{"type": "temperature"})
+		fmt.Printf("  Sensors with type=temperature: %d\n", len(results))
+		for _, r := range results {
+			fmt.Printf("    %s\n", r.Key)
+		}
+	}
+
 	fmt.Println("\n=== Geo ===")
 	{
 		db.GeoAdd("cities", 116.397, 39.908, "Beijing")

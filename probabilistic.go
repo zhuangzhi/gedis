@@ -383,7 +383,10 @@ const (
 func (db *RedisDB) CMSInitByDim(key string, width, depth int) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	db.cmsInitByDimLocked(key, width, depth)
+}
 
+func (db *RedisDB) cmsInitByDimLocked(key string, width, depth int) {
 	if width <= 0 {
 		width = cmsDefaultWidth
 	}
@@ -425,7 +428,7 @@ func (db *RedisDB) CMSIncrByBuffer(key string, item *PooledBuffer, inc int) int 
 	keyBytes := []byte(key)
 	headOff, ok := db.dict.Get(keyBytes)
 	if !ok {
-		db.CMSInitByDim(key, cmsDefaultWidth, cmsDefaultDepth)
+		db.cmsInitByDimLocked(key, cmsDefaultWidth, cmsDefaultDepth)
 		headOff, _ = db.dict.Get(keyBytes)
 	}
 

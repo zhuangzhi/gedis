@@ -34,6 +34,13 @@ func (db *RedisDB) Set(key string, value []byte) {
 	pb.Close()
 }
 
+func (db *RedisDB) setLocked(key string, value []byte) {
+	keyBytes := []byte(key)
+	valOff := db.arena.AllocBytes(value)
+	headOff := db.NewObject(ObjString, ObjEncodingRaw, valOff)
+	db.dict.Set(keyBytes, headOff)
+}
+
 // SetBuffer 设置 key 的值，入参使用 *PooledBuffer 避免堆分配。
 // 调用方通过 Buf(s) 获取，传入后应立即 pb.Close() 归还池。
 func (db *RedisDB) SetBuffer(key string, value *PooledBuffer) {

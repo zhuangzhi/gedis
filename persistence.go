@@ -38,7 +38,7 @@ import (
 const (
 	rdbMagic       = "GEDIS"
 	rdbVersion     = 1
-	rdbHeaderSize  = 5 + 4 + 8 + 8 + 4 + 4 + 4
+	rdbHeaderSize  = 5 + 4 + 8 + 8 + 4 + 4 + 4 + 4 + 4 // +4 for DictTableOff, +4 for DictSize
 )
 
 type RDBHeader struct {
@@ -48,6 +48,8 @@ type RDBHeader struct {
 	LastWALOffset int64
 	ArenaSize     uint32
 	DictCount     uint32
+	DictTableOff  uint32
+	DictSize      uint32
 	CRC32         uint32
 }
 
@@ -95,6 +97,8 @@ func NewPersistenceManager(db *RedisDB, config PersistenceConfig) (*PersistenceM
 	if config.RDB.Enabled && config.RDB.SaveInterval > 0 {
 		pm.saveTimer = time.NewTimer(config.RDB.SaveInterval)
 		go pm.backgroundSaveLoop()
+	} else {
+		close(pm.doneChan)
 	}
 
 	return pm, nil
@@ -197,9 +201,11 @@ func (pm *PersistenceManager) saveToFile(path string) error {
 	binary.BigEndian.PutUint64(headerBuf[17:25], uint64(walOffset))
 	binary.BigEndian.PutUint32(headerBuf[25:29], uint32(pm.db.arena.Size()))
 	binary.BigEndian.PutUint32(headerBuf[29:33], uint32(pm.db.dict.Len()))
+	binary.BigEndian.PutUint32(headerBuf[33:37], uint32(pm.db.dict.table))
+	binary.BigEndian.PutUint32(headerBuf[37:41], uint32(pm.db.dict.size))
 
-	crc := crc32.ChecksumIEEE(headerBuf[:33])
-	binary.BigEndian.PutUint32(headerBuf[33:37], crc)
+	crc := crc32.ChecksumIEEE(headerBuf[:41])
+	binary.BigEndian.PutUint32(headerBuf[41:45], crc)
 
 	if _, err := file.Write(headerBuf[:]); err != nil {
 		return fmt.Errorf("write header: %w", err)
@@ -293,9 +299,11 @@ func (pm *PersistenceManager) loadRDB(path string) error {
 	walOffset := int64(binary.BigEndian.Uint64(headerBuf[17:25]))
 	arenaSize := binary.BigEndian.Uint32(headerBuf[25:29])
 	dictCount := binary.BigEndian.Uint32(headerBuf[29:33])
-	storedCRC := binary.BigEndian.Uint32(headerBuf[33:37])
+	dictTableOff := binary.BigEndian.Uint32(headerBuf[33:37])
+	dictSize := binary.BigEndian.Uint32(headerBuf[37:41])
+	storedCRC := binary.BigEndian.Uint32(headerBuf[41:45])
 
-	computedCRC := crc32.ChecksumIEEE(headerBuf[:33])
+	computedCRC := crc32.ChecksumIEEE(headerBuf[:41])
 	if storedCRC != computedCRC {
 		return fmt.Errorf("header CRC mismatch: expected %x, got %x", storedCRC, computedCRC)
 	}
@@ -309,7 +317,12 @@ func (pm *PersistenceManager) loadRDB(path string) error {
 	defer pm.db.mu.Unlock()
 
 	pm.db.arena = LoadArena(arenaData)
-	pm.db.dict = NewDictFromArena(pm.db.arena, int(dictCount))
+	pm.db.dict = &Dict{
+		arena: pm.db.arena,
+		table: int(dictTableOff),
+		size:  int(dictSize),
+		used:  int(dictCount),
+	}
 	pm.db.expiry = NewDict(pm.db.arena)
 	pm.db.lastWALOffset = walOffset
 

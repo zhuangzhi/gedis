@@ -261,11 +261,14 @@ func (db *RedisDB) GetEx(key string, value []byte, expireMs int64) bool {
 		return false
 	}
 
-	db.Set(key, value)
+	db.setLocked(key, value)
 	if expireMs > 0 {
-		db.PExpire(key, expireMs)
+		expTime := currentTimeMs() + expireMs
+		expTimeOff := db.arena.Alloc(8)
+		db.arena.WriteUint64(expTimeOff, uint64(expTime))
+		db.expiry.Set(keyBytes, expTimeOff)
 	} else if expireMs == -1 {
-		db.Persist(key)
+		db.expiry.Del(keyBytes)
 	}
 	return true
 }
