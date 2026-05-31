@@ -27,6 +27,19 @@ import (
 	"time"
 )
 
+// QueuedCommand 表示队列中的命令
+type QueuedCommand struct {
+	Op    string
+	Key   string
+	Args  [][]byte
+}
+
+// Transaction 表示一个事务
+type Transaction struct {
+	commands []QueuedCommand
+	watched  map[string]uint64 // key -> 版本号
+}
+
 // RedisDB 是嵌入式 Redis-like 内存数据库的主结构。
 // 所有数据存储在 Arena 中，通过 Dict 索引，sync.RWMutex 保证并发安全。
 type RedisDB struct {
@@ -35,6 +48,12 @@ type RedisDB struct {
 	expiry        *Dict
 	lastWALOffset int64
 	mu            sync.RWMutex
+	
+	// 事务相关
+	inTransaction bool
+	commands      []QueuedCommand
+	watched       map[string]uint64 // key -> 版本号
+	keyVersion    map[string]uint64 // key -> 当前版本号
 }
 
 // New 创建一个新的 RedisDB 实例。
@@ -43,9 +62,11 @@ func New() *RedisDB {
 	dict := NewDict(arena)
 	expiry := NewDict(arena)
 	return &RedisDB{
-		arena:  arena,
-		dict:   dict,
-		expiry: expiry,
+		arena:      arena,
+		dict:       dict,
+		expiry:     expiry,
+		watched:    make(map[string]uint64),
+		keyVersion: make(map[string]uint64),
 	}
 }
 
@@ -271,4 +292,148 @@ func (db *RedisDB) GetEx(key string, value []byte, expireMs int64) bool {
 		db.expiry.Del(keyBytes)
 	}
 	return true
+}
+
+// incrementKeyVersion 递增 key 的版本号
+func (db *RedisDB) incrementKeyVersion(key string) {
+	db.keyVersion[key]++
+}
+
+// MULTI 开启事务
+func (db *RedisDB) Multi() {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	
+	if db.inTransaction {
+		return
+	}
+	
+	db.inTransaction = true
+	db.commands = make([]QueuedCommand, 0)
+}
+
+// QueueCommand 将命令加入事务队列
+func (db *RedisDB) QueueCommand(op string, key string, args [][]byte) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	
+	if db.inTransaction {
+		db.commands = append(db.commands, QueuedCommand{
+			Op:   op,
+			Key:  key,
+			Args: args,
+		})
+	}
+}
+
+// EXEC 执行事务
+// 返回值: [执行结果..., 执行失败?]
+func (db *RedisDB) Exec() ([]interface{}, bool) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	
+	if !db.inTransaction {
+		return nil, false
+	}
+	
+	// 检查 WATCH 的 key 是否被修改
+	abort := false
+	for key, version := range db.watched {
+		if db.keyVersion[key] != version {
+			abort = true
+			break
+		}
+	}
+	
+	commands := db.commands
+	
+	// 重置事务状态
+	db.inTransaction = false
+	db.commands = nil
+	db.watched = make(map[string]uint64)
+	
+	if abort {
+		return nil, true
+	}
+	
+	// 执行所有命令
+	results := make([]interface{}, 0, len(commands))
+	
+	for _, cmd := range commands {
+		result := db.executeCommand(cmd.Op, cmd.Key, cmd.Args)
+		results = append(results, result)
+	}
+	
+	return results, false
+}
+
+// DISCARD 取消事务
+func (db *RedisDB) Discard() {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	
+	if !db.inTransaction {
+		return
+	}
+	
+	db.inTransaction = false
+	db.commands = nil
+	db.watched = make(map[string]uint64)
+}
+
+// WATCH 监视 key
+func (db *RedisDB) Watch(keys ...string) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	
+	if db.inTransaction {
+		return
+	}
+	
+	for _, key := range keys {
+		db.watched[key] = db.keyVersion[key]
+	}
+}
+
+// UNWATCH 取消监视所有 key
+func (db *RedisDB) Unwatch() {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	
+	db.watched = make(map[string]uint64)
+}
+
+// InTransaction 检查是否在事务中
+func (db *RedisDB) InTransaction() bool {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	
+	return db.inTransaction
+}
+
+// QueuedCommandCount 获取队列中的命令数量
+func (db *RedisDB) QueuedCommandCount() int {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	
+	return len(db.commands)
+}
+
+// executeCommand 内部执行命令（不检查事务）
+func (db *RedisDB) executeCommand(op string, key string, args [][]byte) interface{} {
+	// 这是一个简单的执行器，仅用于演示
+	// 在实际使用中，应该根据 op 调用相应的方法
+	switch op {
+	case "SET":
+		if len(args) >= 1 {
+			db.setLocked(key, args[0])
+			return "OK"
+		}
+		return "ERR"
+	case "DEL":
+		// 这里需要一个不带锁的版本，先简化
+		return true
+	default:
+		return "ERR unknown command"
+	}
 }

@@ -39,6 +39,7 @@ func (db *RedisDB) setLocked(key string, value []byte) {
 	valOff := db.arena.AllocBytes(value)
 	headOff := db.NewObject(ObjString, ObjEncodingRaw, valOff)
 	db.dict.Set(keyBytes, headOff)
+	db.incrementKeyVersion(key)
 }
 
 // SetBuffer 设置 key 的值，入参使用 *PooledBuffer 避免堆分配。
@@ -51,6 +52,7 @@ func (db *RedisDB) SetBuffer(key string, value *PooledBuffer) {
 	valOff := db.arena.AllocBytes(value.Bytes())
 	headOff := db.NewObject(ObjString, ObjEncodingRaw, valOff)
 	db.dict.Set(keyBytes, headOff)
+	db.incrementKeyVersion(key)
 }
 
 // Get 获取 key 的值。返回 *PooledBuffer，调用方用完后必须 pb.Close()。
